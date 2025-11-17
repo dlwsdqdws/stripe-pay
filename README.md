@@ -1,80 +1,80 @@
-# Pay API
+# Stripe Pay API
 
-一个支持 Stripe 支付和 Apple 内购的 Go 后端服务。
+A Go backend service supporting Stripe payments and Apple in-app purchases.
 
-## 功能特性
+## Features
 
-- ✅ Stripe 支付集成
-- ✅ Apple App Store 内购验证
-- ✅ Webhook 支持
+- ✅ Stripe payment integration
+- ✅ Apple App Store in-app purchase verification
+- ✅ Webhook support
 - ✅ RESTful API
-- ✅ 容器化部署支持
+- ✅ Containerized deployment support
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 
 - Go 1.21+
-- Docker & Docker Compose（可选）
+- Docker & Docker Compose (optional)
 
-### 本地开发
+### Local Development
 
-1. 安装依赖
+1. Install dependencies
 ```bash
 go mod download
 ```
 
-2. 配置环境变量
+2. Configure environment variables
 ```bash
-cp .env.example .env
-# 编辑 .env 文件，填入你的 Stripe 和 Apple 配置
+cp env.example .env
+# Edit the .env file and fill in your Stripe and Apple configuration
 ```
 
-3. 启动服务
+3. Start the service
 ```bash
 go run main.go
 ```
 
-服务将在 `http://localhost:8080` 启动
+The service will start at `http://localhost:8080`
 
-### Docker 部署
+### Docker Deployment
 
 ```bash
 docker-compose up -d
 ```
 
-## API 文档
+## API Documentation
 
-### 健康检查
+### Health Check
 
 ```bash
 GET /ping
 ```
 
-### Stripe 支付
+### Stripe Payment
 
-#### 创建支付
+#### Create Payment
 
 ```bash
 POST /api/v1/stripe/create-payment
 Content-Type: application/json
 
 {
-  "amount": 1000,
-  "currency": "usd",
+  "user_id": "user123",
   "description": "Test payment"
 }
 ```
 
-响应：
+Response:
 ```json
 {
   "client_secret": "pi_xxx_secret_xxx",
-  "payment_id": "uuid"
+  "payment_id": "uuid",
+  "payment_intent_id": "pi_xxx"
 }
 ```
 
-#### 确认支付
+#### Confirm Payment
 
 ```bash
 POST /api/v1/stripe/confirm-payment
@@ -91,9 +91,9 @@ Content-Type: application/json
 POST /api/v1/stripe/webhook
 ```
 
-### Apple 内购
+### Apple In-App Purchase
 
-#### 验证购买
+#### Verify Purchase
 
 ```bash
 POST /api/v1/apple/verify
@@ -105,7 +105,7 @@ Content-Type: application/json
 }
 ```
 
-#### 验证订阅
+#### Verify Subscription
 
 ```bash
 POST /api/v1/apple/verify-subscription
@@ -116,13 +116,13 @@ Content-Type: application/json
 }
 ```
 
-### 查询支付状态
+### Query Payment Status
 
 ```bash
 GET /api/v1/payment/status/:id
 ```
 
-## 配置说明
+## Configuration
 
 ### config.yaml
 
@@ -132,11 +132,11 @@ server:
   host: 0.0.0.0
 
 stripe:
-  secret_key: ""  # Stripe 密钥
-  webhook_secret: ""  # Webhook 密钥
+  secret_key: ""  # Stripe secret key
+  webhook_secret: ""  # Webhook secret
 
 apple:
-  shared_secret: ""  # App Store 共享密钥
+  shared_secret: ""  # App Store shared secret
   production_url: "https://buy.itunes.apple.com/verifyReceipt"
   sandbox_url: "https://sandbox.itunes.apple.com/verifyReceipt"
 
@@ -144,39 +144,44 @@ log:
   level: "info"
 ```
 
-### 环境变量
+### Environment Variables
 
 - `STRIPE_SECRET_KEY`: Stripe Secret Key
 - `STRIPE_WEBHOOK_SECRET`: Stripe Webhook Secret
 - `APPLE_SHARED_SECRET`: Apple Shared Secret
 
-## 开发
+## Development
 
-### 项目结构
+### Project Structure
 
 ```
-pay-api/
-├── main.go           # 应用入口
-├── config.yaml       # 配置文件
-├── conf/             # 配置管理
+stripe-pay/
+├── main.go           # Application entry point
+├── config.yaml       # Configuration file
+├── conf/             # Configuration management
 │   └── config.go
-├── biz/              # 业务逻辑
-│   └── payment_handler.go
+├── biz/              # Business logic
+│   ├── handlers/     # HTTP handlers
+│   ├── services/     # Business services
+│   └── models/       # Data models
+├── cache/            # Redis cache
+├── db/               # Database layer
+├── common/           # Common utilities
 ├── go.mod
 ├── go.sum
 ├── Dockerfile
 └── README.md
 ```
 
-## 安全性
+## Security
 
-⚠️ **重要**：生产环境请务必：
-- 使用 HTTPS
-- 配置正确的 Webhook 签名验证
-- 保护敏感配置信息
-- 实现适当的认证和授权
-- 使用数据库存储支付状态（而不是内存）
+⚠️ **Important**: For production environments, please ensure:
+- Use HTTPS
+- Configure proper webhook signature verification
+- Protect sensitive configuration information
+- Implement appropriate authentication and authorization
+- Use database to store payment status (not in-memory)
 
-## 许可证
+## License
 
 MIT
