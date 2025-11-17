@@ -1,0 +1,477 @@
+package db
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"stripe-pay/conf"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// DuplicateIdempotencyKeyError 表示idempotency_key重复的错误
+type DuplicateIdempotencyKeyError struct {
+	Key string
+}
+
+func (e *DuplicateIdempotencyKeyError) Error() string {
+	return fmt.Sprintf("duplicate idempotency_key: %s", e.Key)
+}
+
+// PaymentHistory 支付历史记录
+type PaymentHistory struct {
+	ID              int64     `json:"id"`
+	PaymentIntentID string    `json:"payment_intent_id"`
+	PaymentID       string    `json:"payment_id"`
+	IdempotencyKey  string    `json:"idempotency_key"` // 幂等性密钥
+	UserID          string    `json:"user_id"`
+	Amount          int64     `json:"amount"`
+	Currency        string    `json:"currency"`
+	Status          string    `json:"status"`
+	PaymentMethod   string    `json:"payment_method"`
+	Description     string    `json:"description"`
+	Metadata        string    `json:"metadata"` // JSON 字符串
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// UserPaymentInfo 用户支付信息
+type UserPaymentInfo struct {
+	ID                 int64      `json:"id"`
+	UserID             string     `json:"user_id"`
+	HasPaid            bool       `json:"has_paid"`
+	FirstPaymentAt     *time.Time `json:"first_payment_at"`
+	LastPaymentAt      *time.Time `json:"last_payment_at"`
+	TotalPaymentCount  int        `json:"total_payment_count"`
+	TotalPaymentAmount int64      `json:"total_payment_amount"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// SavePaymentHistory 保存支付历史记录
+func SavePaymentHistory(ph *PaymentHistory) error {
+	query := `INSERT INTO payment_history 
+		(payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, status, payment_method, description, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			status = VALUES(status),
+			updated_at = CURRENT_TIMESTAMP`
+
+	metadataJSON := ""
+	if ph.Metadata != "" {
+		metadataJSON = ph.Metadata
+	}
+
+	result, err := DB.Exec(query,
+		ph.PaymentIntentID,
+		ph.PaymentID,
+		ph.IdempotencyKey,
+		ph.UserID,
+		ph.Amount,
+		ph.Currency,
+		ph.Status,
+		ph.PaymentMethod,
+		ph.Description,
+		metadataJSON,
+	)
+
+	if err != nil {
+		// 检查是否是字段不存在的错误（数据库迁移未执行）
+		if strings.Contains(err.Error(), "Unknown column 'idempotency_key'") {
+			cfg := conf.GetConf()
+			zap.L().Error("Database migration required: idempotency_key column does not exist",
+				zap.String("payment_intent_id", ph.PaymentIntentID),
+				zap.String("error", err.Error()))
+			return fmt.Errorf("database migration required: please run 'mysql -u %s -p %s < database/add_idempotency_key.sql' to add idempotency_key column (check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
+		}
+		// 检查是否是唯一约束冲突（idempotency_key重复）
+		if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "UNIQUE constraint") {
+			zap.L().Warn("Duplicate idempotency_key detected, payment may already exist",
+				zap.String("idempotency_key", ph.IdempotencyKey),
+				zap.String("payment_intent_id", ph.PaymentIntentID))
+			// 返回特殊错误，让调用者知道是重复请求
+			return &DuplicateIdempotencyKeyError{Key: ph.IdempotencyKey}
+		}
+		zap.L().Error("Failed to save payment history", zap.Error(err))
+		return err
+	}
+
+	id, _ := result.LastInsertId()
+	ph.ID = id
+	zap.L().Info("Payment history saved", zap.Int64("id", id), zap.String("payment_intent_id", ph.PaymentIntentID))
+
+	return nil
+}
+
+// UpdatePaymentStatus 更新支付状态
+func UpdatePaymentStatus(paymentIntentID, status string) error {
+	query := `UPDATE payment_history 
+		SET status = ?, updated_at = CURRENT_TIMESTAMP 
+		WHERE payment_intent_id = ?`
+
+	_, err := DB.Exec(query, status, paymentIntentID)
+	if err != nil {
+		zap.L().Error("Failed to update payment status", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
+		return err
+	}
+
+	zap.L().Info("Payment status updated", zap.String("payment_intent_id", paymentIntentID), zap.String("status", status))
+	return nil
+}
+
+// UpdateUserPaymentInfo 更新用户支付信息（支付成功时调用）
+func UpdateUserPaymentInfo(userID string, amount int64) error {
+	now := time.Now()
+
+	// 先检查用户是否存在
+	var exists bool
+	err := DB.QueryRow("SELECT EXISTS(SELECT 1 FROM user_payment_info WHERE user_id = ?)", userID).Scan(&exists)
+	if err != nil {
+		zap.L().Error("Failed to check user payment info", zap.Error(err))
+		return err
+	}
+
+	if !exists {
+		// 插入新记录
+		query := `INSERT INTO user_payment_info 
+			(user_id, has_paid, first_payment_at, last_payment_at, total_payment_count, total_payment_amount)
+			VALUES (?, TRUE, ?, ?, 1, ?)`
+
+		_, err = DB.Exec(query, userID, now, now, amount)
+		if err != nil {
+			zap.L().Error("Failed to insert user payment info", zap.Error(err))
+			return err
+		}
+	} else {
+		// 更新现有记录
+		// 先检查是否是首次支付
+		var firstPaymentAt sql.NullTime
+		err = DB.QueryRow("SELECT first_payment_at FROM user_payment_info WHERE user_id = ?", userID).Scan(&firstPaymentAt)
+
+		// 如果是首次支付，更新首次支付时间
+		if err == nil && (!firstPaymentAt.Valid || firstPaymentAt.Time.IsZero()) {
+			query := `UPDATE user_payment_info 
+				SET has_paid = TRUE,
+					first_payment_at = ?,
+					last_payment_at = ?,
+					total_payment_count = total_payment_count + 1,
+					total_payment_amount = total_payment_amount + ?,
+					updated_at = CURRENT_TIMESTAMP
+				WHERE user_id = ?`
+			_, err = DB.Exec(query, now, now, amount, userID)
+		} else {
+			// 非首次支付，只更新最近支付时间和统计
+			query := `UPDATE user_payment_info 
+				SET has_paid = TRUE,
+					last_payment_at = ?,
+					total_payment_count = total_payment_count + 1,
+					total_payment_amount = total_payment_amount + ?,
+					updated_at = CURRENT_TIMESTAMP
+				WHERE user_id = ?`
+			_, err = DB.Exec(query, now, amount, userID)
+		}
+
+		if err != nil {
+			zap.L().Error("Failed to update user payment info", zap.Error(err))
+			return err
+		}
+	}
+
+	zap.L().Info("User payment info updated", zap.String("user_id", userID))
+	return nil
+}
+
+// GetUserPaymentInfo 获取用户支付信息（实时从 payment_history 查询，确保准确性）
+func GetUserPaymentInfo(userID string) (*UserPaymentInfo, error) {
+	// 从 payment_history 实时查询成功的支付记录
+	query := `SELECT 
+		COUNT(*) as total_count,
+		COALESCE(SUM(amount), 0) as total_amount,
+		MIN(created_at) as first_payment,
+		MAX(created_at) as last_payment
+		FROM payment_history 
+		WHERE user_id = ? AND status = 'succeeded'`
+
+	var totalCount int
+	var totalAmount int64
+	var firstPayment, lastPayment sql.NullTime
+
+	err := DB.QueryRow(query, userID).Scan(&totalCount, &totalAmount, &firstPayment, &lastPayment)
+	if err != nil && err != sql.ErrNoRows {
+		zap.L().Error("Failed to query payment history for user", zap.Error(err), zap.String("user_id", userID))
+		return nil, err
+	}
+
+	// 构建用户支付信息
+	info := &UserPaymentInfo{
+		UserID:             userID,
+		HasPaid:            totalCount > 0,
+		TotalPaymentCount:  totalCount,
+		TotalPaymentAmount: totalAmount,
+	}
+
+	if firstPayment.Valid {
+		info.FirstPaymentAt = &firstPayment.Time
+	}
+	if lastPayment.Valid {
+		info.LastPaymentAt = &lastPayment.Time
+	}
+
+	// 如果用户有支付记录，尝试同步到 user_payment_info 表（异步更新，不影响返回）
+	if totalCount > 0 {
+		go func() {
+			if err := UpdateUserPaymentInfo(userID, totalAmount); err != nil {
+				zap.L().Warn("Failed to sync user payment info", zap.Error(err), zap.String("user_id", userID))
+			}
+		}()
+	}
+
+	return info, nil
+}
+
+// GetPaymentHistory 获取支付历史（按用户ID）
+func GetPaymentHistory(userID string, limit int) ([]PaymentHistory, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
+		status, payment_method, description, metadata, created_at, updated_at
+		FROM payment_history 
+		WHERE user_id = ? 
+		ORDER BY created_at DESC 
+		LIMIT ?`
+
+	rows, err := DB.Query(query, userID, limit)
+	if err != nil {
+		zap.L().Error("Failed to query payment history", zap.Error(err))
+		return nil, err
+	}
+	defer rows.Close()
+
+	var history []PaymentHistory
+	for rows.Next() {
+		var ph PaymentHistory
+		err := rows.Scan(
+			&ph.ID,
+			&ph.PaymentIntentID,
+			&ph.PaymentID,
+			&ph.IdempotencyKey,
+			&ph.UserID,
+			&ph.Amount,
+			&ph.Currency,
+			&ph.Status,
+			&ph.PaymentMethod,
+			&ph.Description,
+			&ph.Metadata,
+			&ph.CreatedAt,
+			&ph.UpdatedAt,
+		)
+		if err != nil {
+			zap.L().Error("Failed to scan payment history", zap.Error(err))
+			continue
+		}
+		history = append(history, ph)
+	}
+
+	return history, nil
+}
+
+// GetPaymentByIdempotencyKey 根据幂等性密钥获取支付记录
+func GetPaymentByIdempotencyKey(idempotencyKey string) (*PaymentHistory, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+
+	// 先检查字段是否存在（处理数据库迁移未执行的情况）
+	// 如果字段不存在，查询会失败，但我们不想因为这个阻止请求
+	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
+		status, payment_method, description, metadata, created_at, updated_at
+		FROM payment_history 
+		WHERE idempotency_key = ? 
+		LIMIT 1`
+
+	ph := &PaymentHistory{}
+	err := DB.QueryRow(query, idempotencyKey).Scan(
+		&ph.ID,
+		&ph.PaymentIntentID,
+		&ph.PaymentID,
+		&ph.IdempotencyKey,
+		&ph.UserID,
+		&ph.Amount,
+		&ph.Currency,
+		&ph.Status,
+		&ph.PaymentMethod,
+		&ph.Description,
+		&ph.Metadata,
+		&ph.CreatedAt,
+		&ph.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		zap.L().Debug("No payment found with idempotency_key", zap.String("idempotency_key", idempotencyKey))
+		return nil, nil
+	}
+
+	if err != nil {
+		// 检查是否是字段不存在的错误
+		if strings.Contains(err.Error(), "Unknown column") || strings.Contains(err.Error(), "doesn't exist") {
+			zap.L().Warn("idempotency_key column may not exist, database migration may be needed",
+				zap.String("idempotency_key", idempotencyKey),
+				zap.Error(err))
+			// 返回nil而不是错误，让请求继续执行（向后兼容）
+			return nil, nil
+		}
+		zap.L().Error("Failed to get payment by idempotency key", zap.Error(err), zap.String("idempotency_key", idempotencyKey))
+		return nil, err
+	}
+
+	zap.L().Info("Found existing payment by idempotency_key",
+		zap.String("idempotency_key", idempotencyKey),
+		zap.String("payment_intent_id", ph.PaymentIntentID))
+	return ph, nil
+}
+
+// GetPaymentByPaymentID 根据payment_id获取支付记录
+func GetPaymentByPaymentID(paymentID string) (*PaymentHistory, error) {
+	if paymentID == "" {
+		return nil, nil
+	}
+
+	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
+		status, payment_method, description, metadata, created_at, updated_at
+		FROM payment_history 
+		WHERE payment_id = ? 
+		LIMIT 1`
+
+	ph := &PaymentHistory{}
+	err := DB.QueryRow(query, paymentID).Scan(
+		&ph.ID,
+		&ph.PaymentIntentID,
+		&ph.PaymentID,
+		&ph.IdempotencyKey,
+		&ph.UserID,
+		&ph.Amount,
+		&ph.Currency,
+		&ph.Status,
+		&ph.PaymentMethod,
+		&ph.Description,
+		&ph.Metadata,
+		&ph.CreatedAt,
+		&ph.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		zap.L().Debug("No payment found with payment_id", zap.String("payment_id", paymentID))
+		return nil, nil
+	}
+
+	if err != nil {
+		zap.L().Error("Failed to get payment by payment_id", zap.Error(err), zap.String("payment_id", paymentID))
+		return nil, err
+	}
+
+	zap.L().Info("Found payment by payment_id",
+		zap.String("payment_id", paymentID),
+		zap.String("payment_intent_id", ph.PaymentIntentID))
+	return ph, nil
+}
+
+// SavePaymentWithMetadata 保存支付记录（带元数据）
+func SavePaymentWithMetadata(paymentIntentID, paymentID, idempotencyKey, userID string, amount int64, currency, status, paymentMethod, description string, metadata map[string]string) error {
+	metadataJSON := ""
+	if len(metadata) > 0 {
+		bytes, err := json.Marshal(metadata)
+		if err == nil {
+			metadataJSON = string(bytes)
+		}
+	}
+
+	ph := &PaymentHistory{
+		PaymentIntentID: paymentIntentID,
+		PaymentID:       paymentID,
+		IdempotencyKey:  idempotencyKey,
+		UserID:          userID,
+		Amount:          amount,
+		Currency:        currency,
+		Status:          status,
+		PaymentMethod:   paymentMethod,
+		Description:     description,
+		Metadata:        metadataJSON,
+	}
+
+	return SavePaymentHistory(ph)
+}
+
+// PaymentConfig 支付金额配置
+type PaymentConfig struct {
+	ID          int       `json:"id"`
+	Amount      int64     `json:"amount"`      // 金额（分）
+	Currency    string    `json:"currency"`    // 币种
+	Description string    `json:"description"` // 描述
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// GetPaymentConfig 获取支付金额配置（按币种，默认 hkd）
+func GetPaymentConfig(currency string) (*PaymentConfig, error) {
+	if currency == "" {
+		currency = "hkd"
+	}
+
+	query := `SELECT id, amount, currency, description, created_at, updated_at
+		FROM payment_config 
+		WHERE currency = ? 
+		LIMIT 1`
+
+	config := &PaymentConfig{}
+	err := DB.QueryRow(query, currency).Scan(
+		&config.ID,
+		&config.Amount,
+		&config.Currency,
+		&config.Description,
+		&config.CreatedAt,
+		&config.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		// 如果不存在，返回默认值
+		return &PaymentConfig{
+			Amount:   5900,
+			Currency: "hkd",
+		}, nil
+	}
+
+	if err != nil {
+		zap.L().Error("Failed to get payment config", zap.Error(err), zap.String("currency", currency))
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// UpdatePaymentConfig 更新支付金额配置
+func UpdatePaymentConfig(currency string, amount int64, description string) error {
+	if currency == "" {
+		currency = "hkd"
+	}
+
+	// 使用 INSERT ... ON DUPLICATE KEY UPDATE 确保存在则更新，不存在则插入
+	query := `INSERT INTO payment_config (currency, amount, description, updated_at)
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		ON DUPLICATE KEY UPDATE
+			amount = VALUES(amount),
+			description = VALUES(description),
+			updated_at = CURRENT_TIMESTAMP`
+
+	_, err := DB.Exec(query, currency, amount, description)
+	if err != nil {
+		zap.L().Error("Failed to update payment config", zap.Error(err), zap.String("currency", currency), zap.Int64("amount", amount))
+		return err
+	}
+
+	zap.L().Info("Payment config updated", zap.String("currency", currency), zap.Int64("amount", amount))
+	return nil
+}

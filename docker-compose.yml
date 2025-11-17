@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  pay-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - APPLE_SHARED_SECRET=${APPLE_SHARED_SECRET}
+    volumes:
+      - ./config.yaml:/root/config.yaml
+    restart: unless-stopped

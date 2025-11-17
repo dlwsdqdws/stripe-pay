@@ -1,0 +1,529 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"stripe-pay/biz"
+	"stripe-pay/biz/models"
+	"stripe-pay/conf"
+	"stripe-pay/db"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stripe/stripe-go/v78"
+	"github.com/stripe/stripe-go/v78/paymentintent"
+	"go.uber.org/zap"
+)
+
+// PaymentService 支付服务
+type PaymentService struct {
+	cfg *conf.Config
+}
+
+// NewPaymentService 创建支付服务
+func NewPaymentService() *PaymentService {
+	return &PaymentService{
+		cfg: conf.GetConf(),
+	}
+}
+
+// PricingInfo 定价信息
+type PricingInfo struct {
+	Amount   int64
+	Currency string
+	Label    string
+}
+
+// GetCurrentPricing 获取当前定价信息
+func (s *PaymentService) GetCurrentPricing() (*PricingInfo, error) {
+	// 从数据库读取配置
+	if db.DB != nil {
+		config, err := db.GetPaymentConfig("hkd")
+		if err == nil && config != nil {
+			label := "HK$" + formatAmount(config.Amount)
+			return &PricingInfo{
+				Amount:   config.Amount,
+				Currency: config.Currency,
+				Label:    label,
+			}, nil
+		}
+		zap.L().Warn("Failed to get payment config from database, using default", zap.Error(err))
+	}
+
+	// 如果数据库读取失败，使用默认值
+	return &PricingInfo{
+		Amount:   5900,
+		Currency: "hkd",
+		Label:    "HK$59",
+	}, nil
+}
+
+// formatAmount 格式化金额（分转元，保留2位小数）
+func formatAmount(amount int64) string {
+	dollars := float64(amount) / 100.0
+	if dollars == float64(int64(dollars)) {
+		return formatInt(int64(dollars))
+	}
+	return formatFloat(dollars)
+}
+
+// formatInt 格式化整数
+func formatInt(n int64) string {
+	return strconv.FormatInt(n, 10)
+}
+
+// formatFloat 格式化浮点数（保留2位小数）
+func formatFloat(f float64) string {
+	return strconv.FormatFloat(f, 'f', 2, 64)
+}
+
+// CheckUserPaymentValidity 检查用户支付有效性（30天内有效）
+func (s *PaymentService) CheckUserPaymentValidity(userID string) (*UserPaymentValidity, error) {
+	if db.DB == nil {
+		return &UserPaymentValidity{Valid: false}, nil
+	}
+
+	userInfo, err := db.GetUserPaymentInfo(userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user payment info: %w", err)
+	}
+
+	if userInfo == nil || !userInfo.HasPaid {
+		return &UserPaymentValidity{Valid: false}, nil
+	}
+
+	// 检查上次支付时间是否在30天内
+	if userInfo.LastPaymentAt == nil {
+		return &UserPaymentValidity{Valid: false}, nil
+	}
+
+	daysSinceLastPayment := time.Since(*userInfo.LastPaymentAt).Hours() / 24
+	if daysSinceLastPayment <= 30 {
+		return &UserPaymentValidity{
+			Valid:         true,
+			DaysRemaining: int(30 - daysSinceLastPayment),
+			UserInfo:      userInfo,
+		}, nil
+	}
+
+	return &UserPaymentValidity{Valid: false}, nil
+}
+
+// UserPaymentValidity 用户支付有效性信息
+type UserPaymentValidity struct {
+	Valid         bool
+	DaysRemaining int
+	UserInfo      *db.UserPaymentInfo
+}
+
+// CheckIdempotency 检查幂等性，如果已存在则返回已存在的支付信息
+func (s *PaymentService) CheckIdempotency(ctx context.Context, idempotencyKey string) (*models.PaymentResponse, error) {
+	if idempotencyKey == "" || db.DB == nil {
+		return nil, nil
+	}
+
+	existingPayment, err := db.GetPaymentByIdempotencyKey(idempotencyKey)
+	if err != nil {
+		zap.L().Error("Failed to check idempotency", zap.Error(err), zap.String("idempotency_key", idempotencyKey))
+		return nil, nil // 继续执行，不阻止请求
+	}
+
+	if existingPayment == nil {
+		return nil, nil
+	}
+
+	// 找到已存在的支付记录，从Stripe获取最新的PaymentIntent信息
+	stripe.Key = s.cfg.Stripe.SecretKey
+	intent, err := paymentintent.Get(existingPayment.PaymentIntentID, nil)
+	if err != nil {
+		zap.L().Warn("Failed to get payment intent from Stripe, returning cached data", zap.Error(err))
+		// 如果获取失败，返回数据库中的信息（client_secret为空）
+		return &models.PaymentResponse{
+			ClientSecret:    "",
+			PaymentID:       existingPayment.PaymentID,
+			PaymentIntentID: existingPayment.PaymentIntentID,
+		}, nil
+	}
+
+	// 成功获取，返回完整的支付信息
+	return &models.PaymentResponse{
+		ClientSecret:    intent.ClientSecret,
+		PaymentID:       existingPayment.PaymentID,
+		PaymentIntentID: intent.ID,
+	}, nil
+}
+
+// CreateStripePayment 创建Stripe支付
+func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.CreatePaymentRequest, idempotencyKey string) (*models.PaymentResponse, error) {
+	// 验证必需字段
+	if req.UserID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	// 验证输入
+	if err := biz.ValidateUserID(req.UserID); err != nil {
+		return nil, fmt.Errorf("invalid user_id: %w", err)
+	}
+	if err := biz.ValidateDescription(req.Description); err != nil {
+		return nil, fmt.Errorf("invalid description: %w", err)
+	}
+
+	// 检查用户支付有效性
+	validity, err := s.CheckUserPaymentValidity(req.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check user payment validity: %w", err)
+	}
+	if validity.Valid {
+		return nil, &AlreadyPaidError{
+			UserInfo:      validity.UserInfo,
+			DaysRemaining: validity.DaysRemaining,
+		}
+	}
+
+	// 获取定价信息
+	pricing, err := s.GetCurrentPricing()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	// 设置Stripe密钥
+	stripe.Key = s.cfg.Stripe.SecretKey
+
+	// 创建 Payment Intent
+	params := &stripe.PaymentIntentParams{
+		Amount:   stripe.Int64(pricing.Amount),
+		Currency: stripe.String(pricing.Currency),
+		Metadata: map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+		},
+		// 启用自动支付方式（包含 Apple Pay）
+		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
+			Enabled: stripe.Bool(true),
+		},
+	}
+
+	// 如果提供了Idempotency Key，传递给Stripe
+	if idempotencyKey != "" {
+		params.IdempotencyKey = stripe.String(idempotencyKey)
+	}
+
+	intent, err := paymentintent.New(params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create payment intent: %w", err)
+	}
+
+	// 生成支付ID
+	paymentID := uuid.New().String()
+
+	// 保存到数据库
+	if db.DB != nil {
+		metadata := map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+		}
+
+		err = db.SavePaymentWithMetadata(
+			intent.ID,
+			paymentID,
+			idempotencyKey,
+			req.UserID,
+			intent.Amount,
+			string(intent.Currency),
+			string(intent.Status),
+			"card",
+			req.Description,
+			metadata,
+		)
+
+		if err != nil {
+			// 检查是否是重复的idempotency_key（并发情况）
+			if dupErr, ok := err.(*db.DuplicateIdempotencyKeyError); ok {
+				zap.L().Info("Concurrent request with same idempotency_key detected",
+					zap.String("idempotency_key", dupErr.Key))
+				// 查询已存在的支付记录并返回
+				existingPayment, queryErr := db.GetPaymentByIdempotencyKey(dupErr.Key)
+				if queryErr == nil && existingPayment != nil {
+					// 从Stripe获取最新的PaymentIntent信息
+					intent, getErr := paymentintent.Get(existingPayment.PaymentIntentID, nil)
+					if getErr == nil {
+						return &models.PaymentResponse{
+							ClientSecret:    intent.ClientSecret,
+							PaymentID:       existingPayment.PaymentID,
+							PaymentIntentID: intent.ID,
+						}, nil
+					}
+				}
+			}
+			zap.L().Warn("Failed to save payment to database", zap.Error(err))
+		}
+	}
+
+	return &models.PaymentResponse{
+		ClientSecret:    intent.ClientSecret,
+		PaymentID:       paymentID,
+		PaymentIntentID: intent.ID,
+	}, nil
+}
+
+// AlreadyPaidError 用户已支付错误
+type AlreadyPaidError struct {
+	UserInfo      *db.UserPaymentInfo
+	DaysRemaining int
+}
+
+func (e *AlreadyPaidError) Error() string {
+	return fmt.Sprintf("user already paid, %d days remaining", e.DaysRemaining)
+}
+
+// CreateWeChatPayment 创建微信支付
+func (s *PaymentService) CreateWeChatPayment(ctx context.Context, req *models.CreateWeChatPaymentRequest, idempotencyKey string) (map[string]interface{}, error) {
+	// 验证输入
+	if err := biz.ValidateUserID(req.UserID); err != nil {
+		return nil, fmt.Errorf("invalid user_id: %w", err)
+	}
+	if err := biz.ValidateDescription(req.Description); err != nil {
+		return nil, fmt.Errorf("invalid description: %w", err)
+	}
+	if err := biz.ValidateURL(req.ReturnURL); err != nil {
+		return nil, fmt.Errorf("invalid return_url: %w", err)
+	}
+	if err := biz.ValidateClient(req.Client); err != nil {
+		return nil, fmt.Errorf("invalid client: %w", err)
+	}
+
+	// 检查用户支付有效性
+	validity, err := s.CheckUserPaymentValidity(req.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check user payment validity: %w", err)
+	}
+	if validity.Valid {
+		return map[string]interface{}{
+			"already_paid":   true,
+			"message":        "用户已支付成功，无需重复支付",
+			"user_info":      validity.UserInfo,
+			"days_remaining": validity.DaysRemaining,
+		}, nil
+	}
+
+	// 获取定价信息
+	pricing, err := s.GetCurrentPricing()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	// 设置Stripe密钥
+	stripe.Key = s.cfg.Stripe.SecretKey
+
+	client := strings.ToLower(strings.TrimSpace(req.Client))
+	if client == "" {
+		client = "web"
+	}
+
+	params := &stripe.PaymentIntentParams{
+		Amount:             stripe.Int64(pricing.Amount),
+		Currency:           stripe.String(pricing.Currency),
+		PaymentMethodTypes: stripe.StringSlice([]string{"wechat_pay"}),
+		Metadata: map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+		},
+		PaymentMethodOptions: &stripe.PaymentIntentPaymentMethodOptionsParams{
+			WeChatPay: &stripe.PaymentIntentPaymentMethodOptionsWeChatPayParams{
+				Client: stripe.String(client),
+			},
+		},
+	}
+
+	if req.ReturnURL != "" {
+		params.ReturnURL = stripe.String(req.ReturnURL)
+	}
+
+	if idempotencyKey != "" {
+		params.IdempotencyKey = stripe.String(idempotencyKey)
+	}
+
+	intent, err := paymentintent.New(params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create wechat payment intent: %w", err)
+	}
+
+	// 保存到数据库
+	if db.DB != nil {
+		metadata := map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+			"client":      client,
+		}
+		err = db.SavePaymentWithMetadata(
+			intent.ID,
+			uuid.New().String(),
+			idempotencyKey,
+			req.UserID,
+			intent.Amount,
+			string(intent.Currency),
+			string(intent.Status),
+			"wechat_pay",
+			req.Description,
+			metadata,
+		)
+		if err != nil {
+			if dupErr, ok := err.(*db.DuplicateIdempotencyKeyError); ok {
+				existingPayment, queryErr := db.GetPaymentByIdempotencyKey(dupErr.Key)
+				if queryErr == nil && existingPayment != nil {
+					intent, getErr := paymentintent.Get(existingPayment.PaymentIntentID, nil)
+					if getErr == nil {
+						return map[string]interface{}{
+							"client_secret":     intent.ClientSecret,
+							"payment_intent_id": intent.ID,
+							"status":            intent.Status,
+							"message":           "返回已存在的支付记录",
+						}, nil
+					}
+				}
+			}
+			zap.L().Warn("Failed to save wechat payment to database", zap.Error(err))
+		}
+	}
+
+	return map[string]interface{}{
+		"client_secret":     intent.ClientSecret,
+		"payment_intent_id": intent.ID,
+		"status":            intent.Status,
+		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
+	}, nil
+}
+
+// CreateAlipayPayment 创建支付宝支付
+func (s *PaymentService) CreateAlipayPayment(ctx context.Context, req *models.CreateAlipayPaymentRequest, idempotencyKey string) (map[string]interface{}, error) {
+	// 验证输入
+	if err := biz.ValidateUserID(req.UserID); err != nil {
+		return nil, fmt.Errorf("invalid user_id: %w", err)
+	}
+	if err := biz.ValidateDescription(req.Description); err != nil {
+		return nil, fmt.Errorf("invalid description: %w", err)
+	}
+	if err := biz.ValidateURL(req.ReturnURL); err != nil {
+		return nil, fmt.Errorf("invalid return_url: %w", err)
+	}
+
+	// 检查用户支付有效性
+	validity, err := s.CheckUserPaymentValidity(req.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check user payment validity: %w", err)
+	}
+	if validity.Valid {
+		return map[string]interface{}{
+			"already_paid":   true,
+			"message":        "用户已支付成功，无需重复支付",
+			"user_info":      validity.UserInfo,
+			"days_remaining": validity.DaysRemaining,
+		}, nil
+	}
+
+	// 获取定价信息
+	pricing, err := s.GetCurrentPricing()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pricing: %w", err)
+	}
+
+	// 设置Stripe密钥
+	stripe.Key = s.cfg.Stripe.SecretKey
+
+	params := &stripe.PaymentIntentParams{
+		Amount:             stripe.Int64(pricing.Amount),
+		Currency:           stripe.String(pricing.Currency),
+		PaymentMethodTypes: stripe.StringSlice([]string{"alipay"}),
+		Metadata: map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+		},
+	}
+
+	if idempotencyKey != "" {
+		params.IdempotencyKey = stripe.String(idempotencyKey)
+	}
+
+	intent, err := paymentintent.New(params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create alipay payment intent: %w", err)
+	}
+
+	// 保存到数据库
+	if db.DB != nil {
+		metadata := map[string]string{
+			"user_id":     req.UserID,
+			"description": req.Description,
+		}
+		err = db.SavePaymentWithMetadata(
+			intent.ID,
+			uuid.New().String(),
+			idempotencyKey,
+			req.UserID,
+			intent.Amount,
+			string(intent.Currency),
+			string(intent.Status),
+			"alipay",
+			req.Description,
+			metadata,
+		)
+		if err != nil {
+			if dupErr, ok := err.(*db.DuplicateIdempotencyKeyError); ok {
+				existingPayment, queryErr := db.GetPaymentByIdempotencyKey(dupErr.Key)
+				if queryErr == nil && existingPayment != nil {
+					intent, getErr := paymentintent.Get(existingPayment.PaymentIntentID, nil)
+					if getErr == nil {
+						return map[string]interface{}{
+							"client_secret":     intent.ClientSecret,
+							"payment_intent_id": intent.ID,
+							"status":            intent.Status,
+							"return_url":        req.ReturnURL,
+							"message":           "返回已存在的支付记录",
+						}, nil
+					}
+				}
+			}
+			zap.L().Warn("Failed to save alipay payment to database", zap.Error(err))
+		}
+	}
+
+	return map[string]interface{}{
+		"client_secret":     intent.ClientSecret,
+		"payment_intent_id": intent.ID,
+		"status":            intent.Status,
+		"return_url":        req.ReturnURL,
+		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
+	}, nil
+}
+
+// GetPaymentIntent 从Stripe获取PaymentIntent
+func (s *PaymentService) GetPaymentIntent(paymentIntentID string) (*stripe.PaymentIntent, error) {
+	stripe.Key = s.cfg.Stripe.SecretKey
+	intent, err := paymentintent.Get(paymentIntentID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get payment intent: %w", err)
+	}
+	return intent, nil
+}
+
+// ValidatePaymentRequest 验证支付请求
+func (s *PaymentService) ValidatePaymentRequest(req *models.CreatePaymentRequest) error {
+	if err := biz.ValidateUserID(req.UserID); err != nil {
+		return err
+	}
+	if err := biz.ValidateDescription(req.Description); err != nil {
+		return err
+	}
+	return nil
+}
+
+// IsNotFoundError 检查是否是未找到错误
+func IsNotFoundError(err error) bool {
+	return errors.Is(err, ErrPaymentNotFound)
+}
+
+// ErrPaymentNotFound 支付未找到错误
+var ErrPaymentNotFound = errors.New("payment not found")
