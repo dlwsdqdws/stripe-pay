@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>退款测试</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; }
+        .input-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #5568d3; }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 退款测试</h1>
+        
+        <div class="input-group">
+            <label>Payment Intent ID:</label>
+            <input type="text" id="payment_intent_id" placeholder="pi_3SN..." value="">
+        </div>
+        
+        <div class="input-group">
+            <label>退款金额（分，留空全额退款）:</label>
+            <input type="number" id="refund_amount" placeholder="例：2000 = $20 (留空则全额)">
+        </div>
+        
+        <div class="input-group">
+            <label>退款原因（可选）:</label>
+            <input type="text" id="refund_reason" placeholder="requested_by_customer, duplicate, fraudulent">
+        </div>
+        
+        <button onclick="testRefund()">测试退款</button>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8080';
+
+        async function testRefund() {
+            const paymentIntentId = document.getElementById('payment_intent_id').value.trim();
+            const amountStr = document.getElementById('refund_amount').value.trim();
+            const reason = document.getElementById('refund_reason').value.trim();
+            
+            const resultDiv = document.getElementById('result');
+            
+            if (!paymentIntentId) {
+                resultDiv.innerHTML = '<div class="error">请输入 Payment Intent ID</div>';
+                return;
+            }
+            
+            const data = {
+                payment_intent_id: paymentIntentId
+            };
+            
+            if (amountStr) {
+                data.amount = parseInt(amountStr);
+            }
+            
+            if (reason) {
+                data.reason = reason;
+            }
+            
+            resultDiv.innerHTML = '<div class="info">🔄 正在处理退款...</div>';
+            
+            try {
+                const response = await fetch(`${API_URL}/api/v1/stripe/refund`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            ✅ <strong>退款成功！</strong><br><br>
+                            <strong>退款详情：</strong><br>
+                            • Refund ID: <code>${result.refund_id}</code><br>
+                            • 状态: ${result.status}<br>
+                            • 金额: $${(result.amount / 100).toFixed(2)} ${result.currency.toUpperCase()}<br>
+                            • 退款状态: ${result.status}
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="error">
+                            ❌ <strong>退款失败</strong><br>
+                            错误: ${JSON.stringify(result, null, 2)}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        ❌ <strong>请求失败</strong><br>
+                        错误: ${error.message}
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>

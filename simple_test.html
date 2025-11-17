@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>简单支付测试</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        h1 { color: #333; }
+        .input-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #5568d3; }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>Stripe 支付快速测试</h1>
+    
+    <div class="input-group">
+        <label>用户ID <span style="color:red;">*</span></label>
+        <input type="text" id="userId" placeholder="请输入用户ID" value="test_user_001">
+    </div>
+    
+    <div class="input-group">
+        <label>描述</label>
+        <input type="text" id="description" placeholder="支付描述" value="简单测试支付">
+    </div>
+    
+    <button onclick="createPayment()">创建支付</button>
+    
+    <div id="result"></div>
+    
+    <script>
+        // ⚠️ 替换为你的 Stripe 公钥
+        const STRIPE_PUBLIC_KEY = 'pk_test_51SMmu26xpYAaGcYpdjESKiAK2RPFkhLArDeyaM32TI7okwSB3RLxRRCQF1ydYLgKcRM5TBu7OSHXZMOUvSEwyVVD002pIk0KkT';
+        const API_URL = window.location.origin || 'http://localhost:8080';
+        
+        const stripe = Stripe(STRIPE_PUBLIC_KEY);
+        
+        async function createPayment() {
+            const resultDiv = document.getElementById('result');
+            const userId = document.getElementById('userId').value.trim();
+            const description = document.getElementById('description').value.trim() || '测试支付';
+            
+            if (!userId) {
+                resultDiv.innerHTML = '<div class="error">❌ 请输入用户ID</div>';
+                return;
+            }
+            
+            resultDiv.innerHTML = '<div class="info">🔄 正在创建支付...</div>';
+            
+            try {
+                // 步骤1: 获取定价信息
+                const pricingResp = await fetch(`${API_URL}/api/v1/pricing`);
+                const pricing = await pricingResp.json();
+                
+                // 步骤2: 创建支付
+                const response = await fetch(`${API_URL}/api/v1/stripe/create-payment`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        user_id: userId,
+                        description: description
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    resultDiv.innerHTML = `<div class="error">❌ 错误: ${JSON.stringify(data)}</div>`;
+                    return;
+                }
+                
+                // 检查是否已支付
+                if (data.already_paid) {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            ✅ <strong>用户已支付成功</strong><br>
+                            ${data.message || '无需重复支付'}
+                        </div>
+                    `;
+                    return;
+                }
+                
+                if (!data.client_secret) {
+                    resultDiv.innerHTML = `<div class="error">❌ 错误: ${JSON.stringify(data)}</div>`;
+                    return;
+                }
+                
+                resultDiv.innerHTML = `
+                    <div class="success">
+                        <h3>✅ 支付已创建</h3>
+                        <p>Payment ID: ${data.payment_id}</p>
+                        <p>金额: ${pricing.label || '由后端定价'}</p>
+                        <p>现在使用 Stripe 测试卡完成支付...</p>
+                        <p>📋 测试卡号: 4242 4242 4242 4242</p>
+                        <p>📅 有效期: 12/34</p>
+                        <p>🔒 CVC: 123</p>
+                    </div>
+                `;
+                
+                // 步骤3: 确认支付（使用测试卡）
+                const result = await stripe.confirmCardPayment(data.client_secret, {
+                    payment_method: {
+                        card: { number: '4242424242424242' },
+                        billing_details: {
+                            name: 'Test User'
+                        }
+                    }
+                });
+                
+                if (result.error) {
+                    resultDiv.innerHTML = `<div class="error"><h3>❌ 支付失败</h3><p>${result.error.message}</p></div>`;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h3>🎉 支付成功！</h3>
+                            <p>支付 ID: ${result.paymentIntent.id}</p>
+                            <p>状态: ${result.paymentIntent.status}</p>
+                            <p>金额: ${(result.paymentIntent.amount / 100).toFixed(2)} ${result.paymentIntent.currency.toUpperCase()}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error"><h3>❌ 错误</h3><p>${error.message}</p></div>`;
+            }
+        }
+    </script>
+</body>
+</html>

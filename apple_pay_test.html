@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apple Pay 测试</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 { color: #333; margin-bottom: 10px; }
+        .subtitle { color: #666; margin-bottom: 30px; font-size: 14px; }
+        .input-group { margin-bottom: 20px; }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4); }
+        button:disabled { background: #ccc; cursor: not-allowed; transform: none; }
+        .result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        #apple-pay-button {
+            width: 100%;
+            height: 50px;
+            margin-top: 20px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍎 Apple Pay 测试</h1>
+        <p class="subtitle">使用 Stripe 接入 Apple Pay</p>
+        
+        <!-- 金额与币种由后端定价，这里不再输入 -->
+        
+        <div class="input-group">
+            <label>用户ID <span style="color:red;">*</span></label>
+            <input type="text" id="userId" value="" placeholder="请输入用户ID" required>
+        </div>
+        
+        <div class="input-group">
+            <label>描述</label>
+            <input type="text" id="description" value="Apple Pay 测试支付" placeholder="支付描述">
+        </div>
+        
+        <button onclick="createPayment()" id="createBtn">创建支付</button>
+        
+        <div id="apple-pay-container"></div>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        // ⚠️ 替换为你的 Stripe 公钥
+        const STRIPE_PUBLIC_KEY = 'pk_test_51SMmu26xpYAaGcYpdjESKiAK2RPFkhLArDeyaM32TI7okwSB3RLxRRCQF1ydYLgKcRM5TBu7OSHXZMOUvSEwyVVD002pIk0KkT';
+        // 使用与当前页面相同的域名（ngrok 8080 域名）
+        const API_URL = window.location.origin;
+        
+        const stripe = Stripe(STRIPE_PUBLIC_KEY);
+        let paymentRequest = null;
+        let clientSecret = null;
+        let paymentIntentId = null;
+
+        async function createPayment() {
+            // 价格与币种由后端控制
+            const description = document.getElementById('description').value || 'Apple Pay 测试';
+            
+            const btn = document.getElementById('createBtn');
+            const resultDiv = document.getElementById('result');
+            
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading"></span> 处理中...';
+            resultDiv.innerHTML = '';
+            
+            try {
+                // 获取定价
+                const pResp = await fetch(`${API_URL}/api/v1/pricing`);
+                const pricing = await pResp.json();
+                if (!pResp.ok) throw new Error('获取定价失败');
+
+                // 获取用户ID（如果存在）
+                const userIdInput = document.getElementById('userId');
+                const userId = userIdInput ? userIdInput.value.trim() : '';
+                
+                if (!userId) {
+                    throw new Error('请输入用户ID');
+                }
+                
+                // 创建支付
+                const response = await fetch(`${API_URL}/api/v1/stripe/create-payment`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ user_id: userId, description })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(JSON.stringify(data));
+                }
+                
+                // 检查用户是否已经支付过
+                if (data.already_paid) {
+                    const userInfo = data.user_info || {};
+                    const daysRemaining = data.days_remaining !== undefined ? data.days_remaining : 'N/A';
+                    resultDiv.innerHTML = `<div class="success">
+                        ✅ <strong>用户已支付成功</strong><br><br>
+                        <strong>支付信息：</strong><br>
+                        • 用户ID: ${userId}<br>
+                        • 支付次数: ${userInfo.total_payment_count || 0}<br>
+                        • 总支付金额: HK$${((userInfo.total_payment_amount || 0) / 100).toFixed(2)}<br>
+                        • 首次支付时间: ${userInfo.first_payment_at ? new Date(userInfo.first_payment_at).toLocaleString() : 'N/A'}<br>
+                        • 最后支付时间: ${userInfo.last_payment_at ? new Date(userInfo.last_payment_at).toLocaleString() : 'N/A'}<br>
+                        • 剩余有效天数: ${daysRemaining} 天<br><br>
+                        <strong>${data.message || '无需重复支付'}</strong>
+                    </div>`;
+                    btn.disabled = false;
+                    btn.innerHTML = '创建支付';
+                    return;
+                }
+                
+                clientSecret = data.client_secret;
+                paymentIntentId = data.payment_intent_id;
+                
+                // 创建 Payment Request 用于 Apple Pay
+                paymentRequest = stripe.paymentRequest({
+                    country: 'HK',
+                    currency: pricing.currency,
+                    total: { label: pricing.label, amount: pricing.amount },
+                    requestPayerName: true,
+                    requestPayerEmail: true,
+                });
+                
+                // 检查是否支持 Apple Pay
+                const canMakePayment = await paymentRequest.canMakePayment();
+                
+                if (canMakePayment && canMakePayment.applePay) {
+                    const elements = stripe.elements();
+                    const paymentRequestButton = elements.create('paymentRequestButton', {
+                        paymentRequest,
+                        style: {
+                            paymentRequestButton: {
+                                theme: 'dark',
+                                height: '50px',
+                            },
+                        },
+                    });
+                    
+                    paymentRequestButton.mount('#apple-pay-button');
+                    
+                    resultDiv.innerHTML = `<div class="success">
+                        ✅ <strong>支付已创建成功</strong><br>
+                        Payment Intent ID: ${paymentIntentId}<br>
+                        Client Secret: ${clientSecret.substring(0, 30)}...<br><br>
+                        🍎 Apple Pay 按钮已显示，点击使用 Apple Pay 支付
+                    </div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="info">
+                        ⚠️ <strong>不支持 Apple Pay</strong><br>
+                        请确保：<br>
+                        1. 使用 Safari 浏览器<br>
+                        2. 已在 Stripe Dashboard 添加域名<br>
+                        3. 设备已配置 Apple Pay（macOS/iOS）
+                    </div>`;
+                }
+                
+                // 处理支付
+                paymentRequest.on('paymentmethod', async (ev) => {
+                    const {error} = await stripe.confirmCardPayment(
+                        clientSecret,
+                        {payment_method: ev.paymentMethod.id},
+                        {handleActions: false}
+                    );
+                    
+                    if (error) {
+                        ev.complete('fail');
+                        resultDiv.innerHTML = `<div class="error">
+                            ❌ <strong>支付失败</strong><br>
+                            错误: ${error.message}
+                        </div>`;
+                    } else {
+                        ev.complete('success');
+                        resultDiv.innerHTML = `<div class="success">
+                        🎉 <strong>支付成功！</strong><br><br>
+                            Payment Intent ID: <code>${paymentIntentId}</code><br>
+                            状态: succeeded<br>
+                        金额: 以服务器定价为准
+                        </div>`;
+                    }
+                });
+                
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">
+                    ❌ <strong>发生错误</strong><br>
+                    ${error.message}
+                </div>`;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '创建支付';
+            }
+        }
+        
+        // 页面加载时自动创建支付
+        window.onload = () => {
+            setTimeout(createPayment, 500);
+        };
+    </script>
+</body>
+</html>
