@@ -1,0 +1,42 @@
+server:
+  host: "0.0.0.0"
+  port: "8080"
+
+stripe:
+  secret_key: "sk_test_xxx"
+  webhook_secret: "whsec_xxx"
+
+apple:
+  shared_secret: "your_shared_secret"
+  production_url: "https://buy.itunes.apple.com/verifyReceipt"
+  sandbox_url: "https://sandbox.itunes.apple.com/verifyReceipt"
+
+log:
+  level: "info"          # 日志级别: debug, info, warn, error
+  environment: "development"  # 环境: development, production
+  output: "console"      # 输出格式: console (开发环境), json (生产环境推荐)
+
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "password"
+  database: "pay_api"
+  charset: "utf8mb4"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 300
+
+# Redis 缓存配置（可选）
+# 如果不配置 Redis，系统会继续工作，但不会使用缓存
+redis:
+  address: "localhost"      # Redis 服务器地址
+  port: 6379                # Redis 端口
+  password: ""               # Redis 密码（如果设置了密码）
+  db: 0                      # Redis 数据库编号
+  dial_timeout: 5            # 连接超时（秒）
+  read_timeout: 3            # 读取超时（秒）
+  write_timeout: 3           # 写入超时（秒）
+  pool_size: 10              # 连接池大小
+  min_idle_conns: 5          # 最小空闲连接数
+

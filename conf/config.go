@@ -32,7 +32,9 @@ type Config struct {
 	} `yaml:"apple"`
 
 	Log struct {
-		Level string `yaml:"level"`
+		Level       string `yaml:"level"`       // debug, info, warn, error
+		Environment string `yaml:"environment"` // development, production
+		Output      string `yaml:"output"`      // console, json (生产环境推荐 json)
 	} `yaml:"log"`
 
 	Database struct {
@@ -93,6 +95,8 @@ func defaultConfig() {
 	config.Server.Port = "8080"
 	config.Server.Host = "0.0.0.0"
 	config.Log.Level = "info"
+	config.Log.Environment = "development"
+	config.Log.Output = "console"
 
 	// Redis 默认配置
 	config.Redis.Address = ""
@@ -133,6 +137,15 @@ func loadFromEnv() {
 		if db, err := strconv.Atoi(redisDB); err == nil {
 			config.Redis.DB = db
 		}
+	}
+	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
+		config.Log.Level = logLevel
+	}
+	if logEnv := os.Getenv("LOG_ENVIRONMENT"); logEnv != "" {
+		config.Log.Environment = logEnv
+	}
+	if logOutput := os.Getenv("LOG_OUTPUT"); logOutput != "" {
+		config.Log.Output = logOutput
 	}
 }
 
