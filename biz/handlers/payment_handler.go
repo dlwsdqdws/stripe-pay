@@ -26,6 +26,7 @@ import (
 	"github.com/stripe/stripe-go/v78/refund"
 	"github.com/stripe/stripe-go/v78/webhook"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var (
@@ -56,47 +57,66 @@ func getIdempotencyKey(c *app.RequestContext) string {
 
 // CreateStripePayment creates a Stripe payment
 func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
+	common.LogStage(c, "request_received", zap.String("handler", "CreateStripePayment"))
+
 	var req models.CreatePaymentRequest
+	common.LogStage(c, "binding_request")
 	if err := c.BindAndValidate(&req); err != nil {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "bind_failed", zap.Error(err))
 		common.SendError(c, common.ErrInvalidRequest.WithDetails("Failed to bind request: "+err.Error()))
 		return
 	}
+	common.LogStage(c, "request_bound", zap.String("user_id", req.UserID), zap.String("description", req.Description))
 
 	// Explicitly validate required fields (because BindAndValidate may allow empty strings)
+	common.LogStage(c, "validating_required_fields")
 	if req.UserID == "" {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("reason", "user_id is required"))
 		common.SendError(c, common.ErrMissingParameter.WithDetails("user_id is required"))
 		return
 	}
 
 	// Input validation
+	common.LogStage(c, "validating_input")
 	if err := biz.ValidateUserID(req.UserID); err != nil {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("field", "user_id"), zap.Error(err))
 		common.SendError(c, common.ErrValidationFailed.WithDetails(err.Error()))
 		return
 	}
 	if err := biz.ValidateDescription(req.Description); err != nil {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("field", "description"), zap.Error(err))
 		common.SendError(c, common.ErrValidationFailed.WithDetails(err.Error()))
 		return
 	}
+	common.LogStage(c, "validation_passed")
 
 	// Get Idempotency Key
 	idempotencyKey := getIdempotencyKey(c)
+	common.LogStage(c, "checking_idempotency", zap.String("idempotency_key", idempotencyKey))
 
 	// Check idempotency
 	existingPayment, err := getPaymentService().CheckIdempotency(ctx, idempotencyKey)
 	if err != nil {
+		common.LogStageWithLevel(c, zapcore.ErrorLevel, "idempotency_check_failed", zap.Error(err))
 		zap.L().Error("Failed to check idempotency", zap.Error(err))
 		// Continue execution, don't block the request
 	} else if existingPayment != nil {
+		common.LogStage(c, "duplicate_request_detected",
+			zap.String("idempotency_key", idempotencyKey),
+			zap.String("payment_intent_id", existingPayment.PaymentIntentID))
 		zap.L().Info("Duplicate request detected, returning existing payment",
 			zap.String("idempotency_key", idempotencyKey),
 			zap.String("payment_intent_id", existingPayment.PaymentIntentID))
 		c.JSON(consts.StatusOK, existingPayment)
 		return
 	}
+	common.LogStage(c, "idempotency_check_passed")
 
 	// Create payment
+	common.LogStage(c, "creating_payment")
 	response, err := getPaymentService().CreateStripePayment(ctx, &req, idempotencyKey)
 	if err != nil {
+		common.LogStageWithLevel(c, zapcore.ErrorLevel, "payment_creation_failed", zap.Error(err))
 		// Check if it's an already paid error
 		if alreadyPaidErr, ok := err.(*services.AlreadyPaidError); ok {
 			c.JSON(consts.StatusOK, utils.H{
@@ -123,7 +143,12 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	common.LogStage(c, "payment_created",
+		zap.String("payment_id", response.PaymentID),
+		zap.String("payment_intent_id", response.PaymentIntentID))
+
 	// Update cache (asynchronously)
+	common.LogStage(c, "updating_cache")
 	if cache.IsAvailable() && response.PaymentID != "" {
 		go func() {
 			// Get complete information from database and cache
@@ -147,8 +172,10 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 				}
 			}
 		}()
+		common.LogStage(c, "cache_update_scheduled")
 	}
 
+	common.LogStage(c, "sending_response", zap.String("payment_id", response.PaymentID))
 	c.JSON(consts.StatusOK, response)
 }
 
@@ -781,18 +808,24 @@ func AppleWebhook(ctx context.Context, c *app.RequestContext) {
 
 // GetPaymentStatus gets payment status (with Redis cache)
 func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
+	common.LogStage(c, "request_received", zap.String("handler", "GetPaymentStatus"))
+
 	paymentID := string(c.Param("id"))
 	if paymentID == "" {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("reason", "payment_id is required"))
 		common.SendError(c, common.ErrMissingParameter.WithDetails("payment_id is required"))
 		return
 	}
 
+	common.LogStage(c, "payment_status_query_started", zap.String("payment_id", paymentID))
 	zap.L().Info("GetPaymentStatus called", zap.String("payment_id", paymentID))
 
 	// 1. First try to get payment information from Redis cache
+	common.LogStage(c, "checking_cache", zap.String("payment_id", paymentID))
 	if cache.IsAvailable() {
 		cachedData, err := cache.GetPayment(ctx, paymentID)
 		if err == nil && cachedData != nil {
+			common.LogStage(c, "cache_hit", zap.String("payment_id", paymentID))
 			zap.L().Info("Payment found in cache", zap.String("payment_id", paymentID))
 
 			// 1.1 First check Stripe status cache (accuracy-first strategy)
@@ -904,6 +937,7 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// 2. 缓存未命中，从数据库查询
+	common.LogStage(c, "cache_miss_querying_database", zap.String("payment_id", paymentID))
 	var paymentIntentID string
 	var dbStatus string
 	var dbAmount int64
@@ -911,13 +945,20 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 	var payment *db.PaymentHistory
 
 	if db.DB == nil {
+		common.LogStageWithLevel(c, zapcore.WarnLevel, "database_unavailable", zap.String("payment_id", paymentID))
 		zap.L().Warn("Database not available for GetPaymentStatus", zap.String("payment_id", paymentID))
 	} else {
 		var err error
+		common.LogStage(c, "querying_database", zap.String("payment_id", paymentID))
 		payment, err = db.GetPaymentByPaymentID(paymentID)
 		if err != nil {
+			common.LogStageWithLevel(c, zapcore.WarnLevel, "database_query_failed", zap.Error(err), zap.String("payment_id", paymentID))
 			zap.L().Warn("Failed to get payment from database", zap.Error(err), zap.String("payment_id", paymentID))
 		} else if payment != nil {
+			common.LogStage(c, "database_query_success",
+				zap.String("payment_id", paymentID),
+				zap.String("payment_intent_id", payment.PaymentIntentID),
+				zap.String("status", payment.Status))
 			zap.L().Info("Found payment in database",
 				zap.String("payment_id", paymentID),
 				zap.String("payment_intent_id", payment.PaymentIntentID),
@@ -952,8 +993,10 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 
 	// 3. 如果找到了payment_intent_id，查询 Stripe 获取最新状态（准确性优先）
 	if paymentIntentID != "" {
+		common.LogStage(c, "querying_stripe", zap.String("payment_intent_id", paymentIntentID))
 		// 3.1 先检查 Stripe 状态缓存（仅用于中间状态）
 		if cache.IsAvailable() {
+			common.LogStage(c, "checking_stripe_status_cache", zap.String("payment_intent_id", paymentIntentID))
 			stripeStatus, err := cache.GetStripeStatus(ctx, paymentIntentID)
 			if err == nil && stripeStatus != nil {
 				// 准确性优先：最终状态必须实时查询
@@ -1022,8 +1065,10 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 		}
 
 		// 3.2 查询 Stripe API 获取最新状态（保证准确性）
+		common.LogStage(c, "querying_stripe_api", zap.String("payment_intent_id", paymentIntentID))
 		intent, err := getPaymentService().GetPaymentIntent(paymentIntentID)
 		if err != nil {
+			common.LogStageWithLevel(c, zapcore.WarnLevel, "stripe_query_failed", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
 			zap.L().Warn("Failed to get payment intent from Stripe, using database status",
 				zap.Error(err),
 				zap.String("payment_intent_id", paymentIntentID))

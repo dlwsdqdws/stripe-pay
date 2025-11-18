@@ -121,25 +121,34 @@ type UserPaymentValidity struct {
 
 // CheckIdempotency 检查幂等性，如果已存在则返回已存在的支付信息
 func (s *PaymentService) CheckIdempotency(ctx context.Context, idempotencyKey string) (*models.PaymentResponse, error) {
+	zap.L().Debug("Service: CheckIdempotency started", zap.String("idempotency_key", idempotencyKey))
 	if idempotencyKey == "" || db.DB == nil {
+		zap.L().Debug("Service: No idempotency key or DB unavailable, skipping check")
 		return nil, nil
 	}
 
+	zap.L().Debug("Service: Querying database for existing payment", zap.String("idempotency_key", idempotencyKey))
 	existingPayment, err := db.GetPaymentByIdempotencyKey(idempotencyKey)
 	if err != nil {
-		zap.L().Error("Failed to check idempotency", zap.Error(err), zap.String("idempotency_key", idempotencyKey))
+		zap.L().Error("Service: Failed to check idempotency", zap.Error(err), zap.String("idempotency_key", idempotencyKey))
 		return nil, nil // 继续执行，不阻止请求
 	}
 
 	if existingPayment == nil {
+		zap.L().Debug("Service: No existing payment found, proceeding with new payment")
 		return nil, nil
 	}
 
+	zap.L().Info("Service: Existing payment found",
+		zap.String("payment_id", existingPayment.PaymentID),
+		zap.String("payment_intent_id", existingPayment.PaymentIntentID))
+
 	// 找到已存在的支付记录，从Stripe获取最新的PaymentIntent信息
+	zap.L().Debug("Service: Fetching latest PaymentIntent from Stripe", zap.String("payment_intent_id", existingPayment.PaymentIntentID))
 	stripe.Key = s.cfg.Stripe.SecretKey
 	intent, err := paymentintent.Get(existingPayment.PaymentIntentID, nil)
 	if err != nil {
-		zap.L().Warn("Failed to get payment intent from Stripe, returning cached data", zap.Error(err))
+		zap.L().Warn("Service: Failed to get payment intent from Stripe, returning cached data", zap.Error(err))
 		// 如果获取失败，返回数据库中的信息（client_secret为空）
 		return &models.PaymentResponse{
 			ClientSecret:    "",
@@ -147,6 +156,10 @@ func (s *PaymentService) CheckIdempotency(ctx context.Context, idempotencyKey st
 			PaymentIntentID: existingPayment.PaymentIntentID,
 		}, nil
 	}
+
+	zap.L().Info("Service: Successfully retrieved PaymentIntent from Stripe",
+		zap.String("payment_intent_id", intent.ID),
+		zap.String("status", string(intent.Status)))
 
 	// 成功获取，返回完整的支付信息
 	return &models.PaymentResponse{
@@ -158,41 +171,66 @@ func (s *PaymentService) CheckIdempotency(ctx context.Context, idempotencyKey st
 
 // CreateStripePayment 创建Stripe支付
 func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.CreatePaymentRequest, idempotencyKey string) (*models.PaymentResponse, error) {
+	zap.L().Info("Service: CreateStripePayment started",
+		zap.String("user_id", req.UserID),
+		zap.String("idempotency_key", idempotencyKey))
+
 	// 验证必需字段
+	zap.L().Debug("Service: Validating required fields")
 	if req.UserID == "" {
+		zap.L().Warn("Service: user_id is required")
 		return nil, fmt.Errorf("user_id is required")
 	}
 
 	// 验证输入
+	zap.L().Debug("Service: Validating input fields")
 	if err := biz.ValidateUserID(req.UserID); err != nil {
+		zap.L().Warn("Service: Invalid user_id", zap.Error(err))
 		return nil, fmt.Errorf("invalid user_id: %w", err)
 	}
 	if err := biz.ValidateDescription(req.Description); err != nil {
+		zap.L().Warn("Service: Invalid description", zap.Error(err))
 		return nil, fmt.Errorf("invalid description: %w", err)
 	}
 
 	// 检查用户支付有效性
+	zap.L().Debug("Service: Checking user payment validity", zap.String("user_id", req.UserID))
 	validity, err := s.CheckUserPaymentValidity(req.UserID)
 	if err != nil {
+		zap.L().Error("Service: Failed to check user payment validity", zap.Error(err))
 		return nil, fmt.Errorf("failed to check user payment validity: %w", err)
 	}
 	if validity.Valid {
+		zap.L().Info("Service: User already paid",
+			zap.String("user_id", req.UserID),
+			zap.Int("days_remaining", validity.DaysRemaining))
 		return nil, &AlreadyPaidError{
 			UserInfo:      validity.UserInfo,
 			DaysRemaining: validity.DaysRemaining,
 		}
 	}
+	zap.L().Debug("Service: User payment validity check passed")
 
 	// 获取定价信息
+	zap.L().Debug("Service: Getting current pricing")
 	pricing, err := s.GetCurrentPricing()
 	if err != nil {
+		zap.L().Error("Service: Failed to get pricing", zap.Error(err))
 		return nil, fmt.Errorf("failed to get pricing: %w", err)
 	}
+	zap.L().Debug("Service: Pricing retrieved",
+		zap.Int64("amount", pricing.Amount),
+		zap.String("currency", pricing.Currency))
 
 	// 设置Stripe密钥
+	zap.L().Debug("Service: Setting Stripe API key")
 	stripe.Key = s.cfg.Stripe.SecretKey
 
 	// 创建 Payment Intent
+	zap.L().Info("Service: Creating Stripe PaymentIntent",
+		zap.Int64("amount", pricing.Amount),
+		zap.String("currency", pricing.Currency),
+		zap.String("idempotency_key", idempotencyKey))
 	params := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(pricing.Amount),
 		Currency: stripe.String(pricing.Currency),
@@ -213,13 +251,21 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 
 	intent, err := paymentintent.New(params)
 	if err != nil {
+		zap.L().Error("Service: Failed to create Stripe PaymentIntent", zap.Error(err))
 		return nil, fmt.Errorf("failed to create payment intent: %w", err)
 	}
+	zap.L().Info("Service: Stripe PaymentIntent created",
+		zap.String("payment_intent_id", intent.ID),
+		zap.String("status", string(intent.Status)))
 
 	// 生成支付ID
 	paymentID := uuid.New().String()
+	zap.L().Debug("Service: Generated payment ID", zap.String("payment_id", paymentID))
 
 	// 保存到数据库
+	zap.L().Debug("Service: Saving payment to database",
+		zap.String("payment_id", paymentID),
+		zap.String("payment_intent_id", intent.ID))
 	if db.DB != nil {
 		metadata := map[string]string{
 			"user_id":     req.UserID,
@@ -242,7 +288,7 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 		if err != nil {
 			// 检查是否是重复的idempotency_key（并发情况）
 			if dupErr, ok := err.(*db.DuplicateIdempotencyKeyError); ok {
-				zap.L().Info("Concurrent request with same idempotency_key detected",
+				zap.L().Info("Service: Concurrent request with same idempotency_key detected",
 					zap.String("idempotency_key", dupErr.Key))
 				// 查询已存在的支付记录并返回
 				existingPayment, queryErr := db.GetPaymentByIdempotencyKey(dupErr.Key)
@@ -250,6 +296,8 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 					// 从Stripe获取最新的PaymentIntent信息
 					intent, getErr := paymentintent.Get(existingPayment.PaymentIntentID, nil)
 					if getErr == nil {
+						zap.L().Info("Service: Returning existing payment from concurrent request",
+							zap.String("payment_id", existingPayment.PaymentID))
 						return &models.PaymentResponse{
 							ClientSecret:    intent.ClientSecret,
 							PaymentID:       existingPayment.PaymentID,
@@ -258,10 +306,17 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 					}
 				}
 			}
-			zap.L().Warn("Failed to save payment to database", zap.Error(err))
+			zap.L().Warn("Service: Failed to save payment to database", zap.Error(err))
+		} else {
+			zap.L().Info("Service: Payment saved to database successfully",
+				zap.String("payment_id", paymentID),
+				zap.String("payment_intent_id", intent.ID))
 		}
 	}
 
+	zap.L().Info("Service: CreateStripePayment completed successfully",
+		zap.String("payment_id", paymentID),
+		zap.String("payment_intent_id", intent.ID))
 	return &models.PaymentResponse{
 		ClientSecret:    intent.ClientSecret,
 		PaymentID:       paymentID,

@@ -87,6 +87,9 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
+	// Add request logging middleware (logs request start, end, and latency)
+	h.Use(common.RequestLogger())
+
 	// Add error recovery middleware (catches panic)
 	h.Use(common.RecoveryHandler())
 
