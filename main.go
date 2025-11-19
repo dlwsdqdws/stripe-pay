@@ -101,6 +101,12 @@ func main() {
 	// 添加错误恢复中间件（捕获panic）
 	h.Use(common.RecoveryHandler())
 
+	// 初始化认证
+	common.InitAuth()
+
+	// 添加认证中间件（在路由注册之前）
+	h.Use(common.AuthMiddleware())
+
 	// 注册路由
 	registerRoutes(h)
 
@@ -250,9 +256,13 @@ func registerRoutes(h *server.Hertz) {
 			paymentStatusAPI.GET("/status-change/:payment_intent_id", handlers.CheckStatusChange)
 		}
 
-		// 支付配置管理（管理员接口）
-		api.GET("/payment/config", handlers.GetPaymentConfig)
-		api.PUT("/payment/config", handlers.UpdatePaymentConfig)
+		// 支付配置管理（管理员接口，需要管理员权限）
+		adminAPI := api.Group("/payment")
+		adminAPI.Use(common.AdminAuthMiddleware())
+		{
+			adminAPI.GET("/config", handlers.GetPaymentConfig)
+			adminAPI.PUT("/config", handlers.UpdatePaymentConfig)
+		}
 	}
 }
 
