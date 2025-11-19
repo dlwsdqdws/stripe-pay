@@ -36,7 +36,7 @@ A comprehensive Go backend service for payment processing with Stripe integratio
 ### Technical Features
 
 - ✅ **RESTful API** with comprehensive error handling
-- ✅ **Database Persistence** (MySQL) for payment records
+- ✅ **Database Persistence** (PostgreSQL) for payment records
 - ✅ **Redis Caching** for performance optimization
 - ✅ **Webhook Support** for Stripe and Apple events
 - ✅ **CORS Support** for cross-origin requests
@@ -59,7 +59,7 @@ A comprehensive Go backend service for payment processing with Stripe integratio
 ### Requirements
 
 - Go 1.21+
-- MySQL 5.7+ (or MySQL 8.0+)
+- PostgreSQL 12+ (推荐 PostgreSQL 14+)
 - Redis 6.0+ (optional, for caching)
 - Docker & Docker Compose (optional)
 
@@ -519,7 +519,7 @@ stripe-pay/
 ### Technology Stack
 
 - **Framework**: CloudWeGo Hertz (high-performance HTTP framework)
-- **Database**: MySQL (for persistent storage)
+- **Database**: PostgreSQL (for persistent storage)
 - **Cache**: Redis (for performance optimization)
 - **Payment**: Stripe API
 - **Logging**: Zap (structured logging)

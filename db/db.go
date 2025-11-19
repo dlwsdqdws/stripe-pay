@@ -6,7 +6,7 @@ import (
 	"stripe-pay/conf"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -16,18 +16,18 @@ var DB *sql.DB
 func Init() error {
 	cfg := conf.GetConf()
 
-	// 构建 DSN (Data Source Name)
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local",
+	// 构建 PostgreSQL DSN (Data Source Name)
+	// PostgreSQL 连接字符串格式: postgres://user:password@host:port/database?sslmode=disable
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		cfg.Database.User,
 		cfg.Database.Password,
 		cfg.Database.Host,
 		cfg.Database.Port,
 		cfg.Database.Database,
-		cfg.Database.Charset,
 	)
 
 	var err error
-	DB, err = sql.Open("mysql", dsn)
+	DB, err = sql.Open("postgres", dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -57,11 +57,13 @@ func Init() error {
 
 // checkDatabaseSchema 检查数据库结构，确保必要的字段和索引存在
 func checkDatabaseSchema() error {
-	// 检查 idempotency_key 字段是否存在
+	cfg := conf.GetConf()
+	
+	// 检查 idempotency_key 字段是否存在（PostgreSQL）
 	var columnExists int
 	query := `SELECT COUNT(*) 
-		FROM INFORMATION_SCHEMA.COLUMNS 
-		WHERE table_schema = DATABASE() 
+		FROM information_schema.columns 
+		WHERE table_schema = current_schema()
 		  AND table_name = 'payment_history' 
 		  AND column_name = 'idempotency_key'`
 
@@ -71,17 +73,16 @@ func checkDatabaseSchema() error {
 	}
 
 	if columnExists == 0 {
-		cfg := conf.GetConf()
-		return fmt.Errorf("database migration required: idempotency_key column does not exist. Please run: mysql -u %s -p %s < database/add_idempotency_key.sql (or check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
+		return fmt.Errorf("database migration required: idempotency_key column does not exist. Please run: psql -U %s -d %s -f database/add_idempotency_key.sql (or check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
 	}
 
-	// 检查唯一索引是否存在
+	// 检查唯一索引是否存在（PostgreSQL）
 	var indexExists int
 	query = `SELECT COUNT(*) 
-		FROM INFORMATION_SCHEMA.STATISTICS 
-		WHERE table_schema = DATABASE() 
-		  AND table_name = 'payment_history' 
-		  AND index_name = 'uk_idempotency_key'`
+		FROM pg_indexes 
+		WHERE schemaname = current_schema()
+		  AND tablename = 'payment_history' 
+		  AND indexname = 'uk_idempotency_key'`
 
 	err = DB.QueryRow(query).Scan(&indexExists)
 	if err != nil {
@@ -89,8 +90,7 @@ func checkDatabaseSchema() error {
 	}
 
 	if indexExists == 0 {
-		cfg := conf.GetConf()
-		return fmt.Errorf("database migration required: uk_idempotency_key index does not exist. Please run: mysql -u %s -p %s < database/add_idempotency_key.sql (or check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
+		return fmt.Errorf("database migration required: uk_idempotency_key index does not exist. Please run: psql -U %s -d %s -f database/add_idempotency_key.sql (or check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
 	}
 
 	zap.L().Info("Database schema check passed: idempotency_key column and index exist")

@@ -52,19 +52,21 @@ type UserPaymentInfo struct {
 
 // SavePaymentHistory 保存支付历史记录
 func SavePaymentHistory(ph *PaymentHistory) error {
+	// PostgreSQL: 使用 ON CONFLICT 处理 payment_intent_id 或 idempotency_key 的冲突
 	query := `INSERT INTO payment_history 
 		(payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, status, payment_method, description, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			status = VALUES(status),
-			updated_at = CURRENT_TIMESTAMP`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (payment_intent_id) DO UPDATE
+			SET status = EXCLUDED.status,
+				updated_at = CURRENT_TIMESTAMP
+		RETURNING id`
 
 	metadataJSON := ""
 	if ph.Metadata != "" {
 		metadataJSON = ph.Metadata
 	}
 
-	result, err := DB.Exec(query,
+	err := DB.QueryRow(query,
 		ph.PaymentIntentID,
 		ph.PaymentID,
 		ph.IdempotencyKey,
@@ -75,19 +77,19 @@ func SavePaymentHistory(ph *PaymentHistory) error {
 		ph.PaymentMethod,
 		ph.Description,
 		metadataJSON,
-	)
+	).Scan(&ph.ID)
 
 	if err != nil {
 		// 检查是否是字段不存在的错误（数据库迁移未执行）
-		if strings.Contains(err.Error(), "Unknown column 'idempotency_key'") {
+		if strings.Contains(err.Error(), "column") && strings.Contains(err.Error(), "does not exist") {
 			cfg := conf.GetConf()
 			zap.L().Error("Database migration required: idempotency_key column does not exist",
 				zap.String("payment_intent_id", ph.PaymentIntentID),
 				zap.String("error", err.Error()))
-			return fmt.Errorf("database migration required: please run 'mysql -u %s -p %s < database/add_idempotency_key.sql' to add idempotency_key column (check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
+			return fmt.Errorf("database migration required: please run 'psql -U %s -d %s -f database/add_idempotency_key.sql' to add idempotency_key column (check config.yaml for your database user)", cfg.Database.User, cfg.Database.Database)
 		}
 		// 检查是否是唯一约束冲突（idempotency_key重复）
-		if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "UNIQUE constraint") {
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "unique constraint") {
 			zap.L().Warn("Duplicate idempotency_key detected, payment may already exist",
 				zap.String("idempotency_key", ph.IdempotencyKey),
 				zap.String("payment_intent_id", ph.PaymentIntentID))
@@ -98,9 +100,7 @@ func SavePaymentHistory(ph *PaymentHistory) error {
 		return err
 	}
 
-	id, _ := result.LastInsertId()
-	ph.ID = id
-	zap.L().Info("Payment history saved", zap.Int64("id", id), zap.String("payment_intent_id", ph.PaymentIntentID))
+	zap.L().Info("Payment history saved", zap.Int64("id", ph.ID), zap.String("payment_intent_id", ph.PaymentIntentID))
 
 	return nil
 }
@@ -108,8 +108,8 @@ func SavePaymentHistory(ph *PaymentHistory) error {
 // UpdatePaymentStatus 更新支付状态
 func UpdatePaymentStatus(paymentIntentID, status string) error {
 	query := `UPDATE payment_history 
-		SET status = ?, updated_at = CURRENT_TIMESTAMP 
-		WHERE payment_intent_id = ?`
+		SET status = $1, updated_at = CURRENT_TIMESTAMP 
+		WHERE payment_intent_id = $2`
 
 	_, err := DB.Exec(query, status, paymentIntentID)
 	if err != nil {
@@ -127,7 +127,7 @@ func UpdateUserPaymentInfo(userID string, amount int64) error {
 
 	// 先检查用户是否存在
 	var exists bool
-	err := DB.QueryRow("SELECT EXISTS(SELECT 1 FROM user_payment_info WHERE user_id = ?)", userID).Scan(&exists)
+	err := DB.QueryRow("SELECT EXISTS(SELECT 1 FROM user_payment_info WHERE user_id = $1)", userID).Scan(&exists)
 	if err != nil {
 		zap.L().Error("Failed to check user payment info", zap.Error(err))
 		return err
@@ -137,7 +137,7 @@ func UpdateUserPaymentInfo(userID string, amount int64) error {
 		// 插入新记录
 		query := `INSERT INTO user_payment_info 
 			(user_id, has_paid, first_payment_at, last_payment_at, total_payment_count, total_payment_amount)
-			VALUES (?, TRUE, ?, ?, 1, ?)`
+			VALUES ($1, true, $2, $3, 1, $4)`
 
 		_, err = DB.Exec(query, userID, now, now, amount)
 		if err != nil {
@@ -148,28 +148,28 @@ func UpdateUserPaymentInfo(userID string, amount int64) error {
 		// 更新现有记录
 		// 先检查是否是首次支付
 		var firstPaymentAt sql.NullTime
-		err = DB.QueryRow("SELECT first_payment_at FROM user_payment_info WHERE user_id = ?", userID).Scan(&firstPaymentAt)
+		err = DB.QueryRow("SELECT first_payment_at FROM user_payment_info WHERE user_id = $1", userID).Scan(&firstPaymentAt)
 
 		// 如果是首次支付，更新首次支付时间
 		if err == nil && (!firstPaymentAt.Valid || firstPaymentAt.Time.IsZero()) {
 			query := `UPDATE user_payment_info 
-				SET has_paid = TRUE,
-					first_payment_at = ?,
-					last_payment_at = ?,
+				SET has_paid = true,
+					first_payment_at = $1,
+					last_payment_at = $2,
 					total_payment_count = total_payment_count + 1,
-					total_payment_amount = total_payment_amount + ?,
+					total_payment_amount = total_payment_amount + $3,
 					updated_at = CURRENT_TIMESTAMP
-				WHERE user_id = ?`
+				WHERE user_id = $4`
 			_, err = DB.Exec(query, now, now, amount, userID)
 		} else {
 			// 非首次支付，只更新最近支付时间和统计
 			query := `UPDATE user_payment_info 
-				SET has_paid = TRUE,
-					last_payment_at = ?,
+				SET has_paid = true,
+					last_payment_at = $1,
 					total_payment_count = total_payment_count + 1,
-					total_payment_amount = total_payment_amount + ?,
+					total_payment_amount = total_payment_amount + $2,
 					updated_at = CURRENT_TIMESTAMP
-				WHERE user_id = ?`
+				WHERE user_id = $3`
 			_, err = DB.Exec(query, now, amount, userID)
 		}
 
@@ -192,7 +192,7 @@ func GetUserPaymentInfo(userID string) (*UserPaymentInfo, error) {
 		MIN(created_at) as first_payment,
 		MAX(created_at) as last_payment
 		FROM payment_history 
-		WHERE user_id = ? AND status = 'succeeded'`
+		WHERE user_id = $1 AND status = 'succeeded'`
 
 	var totalCount int
 	var totalAmount int64
@@ -236,9 +236,9 @@ func GetPaymentHistory(userID string, limit int) ([]PaymentHistory, error) {
 	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
 		status, payment_method, description, metadata, created_at, updated_at
 		FROM payment_history 
-		WHERE user_id = ? 
+		WHERE user_id = $1 
 		ORDER BY created_at DESC 
-		LIMIT ?`
+		LIMIT $2`
 
 	rows, err := DB.Query(query, userID, limit)
 	if err != nil {
@@ -286,7 +286,7 @@ func GetPaymentByIdempotencyKey(idempotencyKey string) (*PaymentHistory, error) 
 	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
 		status, payment_method, description, metadata, created_at, updated_at
 		FROM payment_history 
-		WHERE idempotency_key = ? 
+		WHERE idempotency_key = $1 
 		LIMIT 1`
 
 	ph := &PaymentHistory{}
@@ -313,7 +313,7 @@ func GetPaymentByIdempotencyKey(idempotencyKey string) (*PaymentHistory, error) 
 
 	if err != nil {
 		// 检查是否是字段不存在的错误
-		if strings.Contains(err.Error(), "Unknown column") || strings.Contains(err.Error(), "doesn't exist") {
+		if strings.Contains(err.Error(), "column") && strings.Contains(err.Error(), "does not exist") {
 			zap.L().Warn("idempotency_key column may not exist, database migration may be needed",
 				zap.String("idempotency_key", idempotencyKey),
 				zap.Error(err))
@@ -339,7 +339,7 @@ func GetPaymentByPaymentID(paymentID string) (*PaymentHistory, error) {
 	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
 		status, payment_method, description, metadata, created_at, updated_at
 		FROM payment_history 
-		WHERE payment_id = ? 
+		WHERE payment_id = $1 
 		LIMIT 1`
 
 	ph := &PaymentHistory{}
@@ -384,7 +384,7 @@ func GetPaymentByIntentID(paymentIntentID string) (*PaymentHistory, error) {
 	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
 		status, payment_method, description, metadata, created_at, updated_at
 		FROM payment_history 
-		WHERE payment_intent_id = ? 
+		WHERE payment_intent_id = $1 
 		LIMIT 1`
 
 	ph := &PaymentHistory{}
@@ -464,7 +464,7 @@ func GetPaymentConfig(currency string) (*PaymentConfig, error) {
 
 	query := `SELECT id, amount, currency, description, created_at, updated_at
 		FROM payment_config 
-		WHERE currency = ? 
+		WHERE currency = $1 
 		LIMIT 1`
 
 	config := &PaymentConfig{}
@@ -499,13 +499,13 @@ func UpdatePaymentConfig(currency string, amount int64, description string) erro
 		currency = "hkd"
 	}
 
-	// 使用 INSERT ... ON DUPLICATE KEY UPDATE 确保存在则更新，不存在则插入
+	// 使用 INSERT ... ON CONFLICT DO UPDATE 确保存在则更新，不存在则插入（PostgreSQL）
 	query := `INSERT INTO payment_config (currency, amount, description, updated_at)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-		ON DUPLICATE KEY UPDATE
-			amount = VALUES(amount),
-			description = VALUES(description),
-			updated_at = CURRENT_TIMESTAMP`
+		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+		ON CONFLICT (currency) DO UPDATE
+			SET amount = EXCLUDED.amount,
+				description = EXCLUDED.description,
+				updated_at = CURRENT_TIMESTAMP`
 
 	_, err := DB.Exec(query, currency, amount, description)
 	if err != nil {

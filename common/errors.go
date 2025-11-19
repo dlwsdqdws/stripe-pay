@@ -142,7 +142,6 @@ func sanitizeError(err error) string {
 		"credential",
 		"connection string",
 		"database://",
-		"mysql://",
 		"postgres://",
 	}
 
