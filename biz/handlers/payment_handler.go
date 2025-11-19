@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
 	"stripe-pay/biz"
 	"stripe-pay/biz/models"
 	"stripe-pay/biz/services"
@@ -14,6 +12,8 @@ import (
 	"stripe-pay/common"
 	"stripe-pay/conf"
 	"stripe-pay/db"
+	"strconv"
+	"strings"
 	"time"
 
 	"sync"
@@ -34,7 +34,7 @@ var (
 	paymentServiceOnce sync.Once
 )
 
-// getPaymentService gets the payment service (lazy loading)
+// getPaymentService 获取支付服务（懒加载）
 func getPaymentService() *services.PaymentService {
 	paymentServiceOnce.Do(func() {
 		paymentService = services.NewPaymentService()
@@ -42,7 +42,7 @@ func getPaymentService() *services.PaymentService {
 	return paymentService
 }
 
-// getIdempotencyKey gets the idempotency key from the request
+// getIdempotencyKey 从请求中获取幂等性密钥
 func getIdempotencyKey(c *app.RequestContext) string {
 	key := string(c.GetHeader("Idempotency-Key"))
 	if key != "" {
@@ -55,7 +55,7 @@ func getIdempotencyKey(c *app.RequestContext) string {
 	return ""
 }
 
-// CreateStripePayment creates a Stripe payment
+// CreateStripePayment 创建Stripe支付
 func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 	common.LogStage(c, "request_received", zap.String("handler", "CreateStripePayment"))
 
@@ -68,7 +68,7 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 	}
 	common.LogStage(c, "request_bound", zap.String("user_id", req.UserID), zap.String("description", req.Description))
 
-	// Explicitly validate required fields (because BindAndValidate may allow empty strings)
+	// 显式验证必需字段（因为BindAndValidate可能允许空字符串）
 	common.LogStage(c, "validating_required_fields")
 	if req.UserID == "" {
 		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("reason", "user_id is required"))
@@ -76,7 +76,7 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Input validation
+	// 输入验证
 	common.LogStage(c, "validating_input")
 	if err := biz.ValidateUserID(req.UserID); err != nil {
 		common.LogStageWithLevel(c, zapcore.WarnLevel, "validation_failed", zap.String("field", "user_id"), zap.Error(err))
@@ -90,16 +90,16 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 	}
 	common.LogStage(c, "validation_passed")
 
-	// Get Idempotency Key
+	// 获取Idempotency Key
 	idempotencyKey := getIdempotencyKey(c)
 	common.LogStage(c, "checking_idempotency", zap.String("idempotency_key", idempotencyKey))
 
-	// Check idempotency
+	// 检查幂等性
 	existingPayment, err := getPaymentService().CheckIdempotency(ctx, idempotencyKey)
 	if err != nil {
 		common.LogStageWithLevel(c, zapcore.ErrorLevel, "idempotency_check_failed", zap.Error(err))
 		zap.L().Error("Failed to check idempotency", zap.Error(err))
-		// Continue execution, don't block the request
+		// 继续执行，不阻止请求
 	} else if existingPayment != nil {
 		common.LogStage(c, "duplicate_request_detected",
 			zap.String("idempotency_key", idempotencyKey),
@@ -112,33 +112,33 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 	}
 	common.LogStage(c, "idempotency_check_passed")
 
-	// Create payment
+	// 创建支付
 	common.LogStage(c, "creating_payment")
 	response, err := getPaymentService().CreateStripePayment(ctx, &req, idempotencyKey)
 	if err != nil {
 		common.LogStageWithLevel(c, zapcore.ErrorLevel, "payment_creation_failed", zap.Error(err))
-		// Check if it's an already paid error
+		// 检查是否是已支付错误
 		if alreadyPaidErr, ok := err.(*services.AlreadyPaidError); ok {
 			c.JSON(consts.StatusOK, utils.H{
 				"already_paid":   true,
-				"message":        "User has already paid successfully, no need to pay again",
+				"message":        "用户已支付成功，无需重复支付",
 				"user_info":      alreadyPaidErr.UserInfo,
 				"days_remaining": alreadyPaidErr.DaysRemaining,
 			})
 			return
 		}
 
-		// Check if it's a validation error (should return 400 instead of 500)
+		// 检查是否是验证错误（应该返回400而不是500）
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "required") ||
 			strings.Contains(errStr, "invalid") ||
 			strings.Contains(errStr, "validation") {
-			// This is a validation error, should return 400
-			common.SendError(c, err) // WrapError will automatically identify and convert to the correct error type
+			// 这是验证错误，应该返回400
+			common.SendError(c, err) // WrapError会自动识别并转换为正确的错误类型
 			return
 		}
 
-		// Other errors as payment processing errors
+		// 其他错误作为支付处理错误
 		common.SendError(c, common.ErrPaymentProcessing.WithDetails(err.Error()))
 		return
 	}
@@ -147,11 +147,11 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 		zap.String("payment_id", response.PaymentID),
 		zap.String("payment_intent_id", response.PaymentIntentID))
 
-	// Update cache (asynchronously)
+	// 更新缓存（异步）
 	common.LogStage(c, "updating_cache")
 	if cache.IsAvailable() && response.PaymentID != "" {
 		go func() {
-			// Get complete information from database and cache
+			// 从数据库获取完整信息并缓存
 			if db.DB != nil {
 				payment, err := db.GetPaymentByPaymentID(response.PaymentID)
 				if err == nil && payment != nil {
@@ -179,7 +179,7 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, response)
 }
 
-// CreateStripeWeChatPayment creates a WeChat Pay payment
+// CreateStripeWeChatPayment 创建微信支付
 func CreateStripeWeChatPayment(ctx context.Context, c *app.RequestContext) {
 	var req models.CreateWeChatPaymentRequest
 	if err := c.BindAndValidate(&req); err != nil {
@@ -189,7 +189,7 @@ func CreateStripeWeChatPayment(ctx context.Context, c *app.RequestContext) {
 
 	idempotencyKey := getIdempotencyKey(c)
 
-	// Check idempotency
+	// 检查幂等性
 	existingPayment, err := getPaymentService().CheckIdempotency(ctx, idempotencyKey)
 	if err != nil {
 		zap.L().Error("Failed to check idempotency", zap.Error(err))
@@ -200,12 +200,12 @@ func CreateStripeWeChatPayment(ctx context.Context, c *app.RequestContext) {
 			"client_secret":     existingPayment.ClientSecret,
 			"payment_intent_id": existingPayment.PaymentIntentID,
 			"status":            "pending",
-			"message":           "Returning existing payment record",
+			"message":           "返回已存在的支付记录",
 		})
 		return
 	}
 
-	// Create payment
+	// 创建支付
 	response, err := getPaymentService().CreateWeChatPayment(ctx, &req, idempotencyKey)
 	if err != nil {
 		common.SendError(c, common.ErrPaymentProcessing.WithDetails(err.Error()))
@@ -215,44 +215,7 @@ func CreateStripeWeChatPayment(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, response)
 }
 
-// CreateStripeAlipayPayment creates an Alipay payment
-func CreateStripeAlipayPayment(ctx context.Context, c *app.RequestContext) {
-	var req models.CreateAlipayPaymentRequest
-	if err := c.BindAndValidate(&req); err != nil {
-		common.SendError(c, common.ErrInvalidRequest.WithDetails("Failed to bind request"))
-		return
-	}
-
-	idempotencyKey := getIdempotencyKey(c)
-
-	// Check idempotency
-	existingPayment, err := getPaymentService().CheckIdempotency(ctx, idempotencyKey)
-	if err != nil {
-		zap.L().Error("Failed to check idempotency", zap.Error(err))
-	} else if existingPayment != nil {
-		zap.L().Info("Duplicate request detected, returning existing payment",
-			zap.String("idempotency_key", idempotencyKey))
-		c.JSON(consts.StatusOK, utils.H{
-			"client_secret":     existingPayment.ClientSecret,
-			"payment_intent_id": existingPayment.PaymentIntentID,
-			"status":            "pending",
-			"return_url":        req.ReturnURL,
-			"message":           "Returning existing payment record",
-		})
-		return
-	}
-
-	// Create payment
-	response, err := getPaymentService().CreateAlipayPayment(ctx, &req, idempotencyKey)
-	if err != nil {
-		common.SendError(c, common.ErrPaymentProcessing.WithDetails(err.Error()))
-		return
-	}
-
-	c.JSON(consts.StatusOK, response)
-}
-
-// GetPricing gets pricing information
+// GetPricing 获取定价信息
 func GetPricing(ctx context.Context, c *app.RequestContext) {
 	pricing, err := getPaymentService().GetCurrentPricing()
 	if err != nil {
@@ -267,7 +230,7 @@ func GetPricing(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// ConfirmStripePayment confirms a payment
+// ConfirmStripePayment 确认支付
 func ConfirmStripePayment(ctx context.Context, c *app.RequestContext) {
 	var req models.ConfirmPaymentRequest
 	if err := c.BindAndValidate(&req); err != nil {
@@ -275,7 +238,7 @@ func ConfirmStripePayment(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Enhanced input validation
+	// 输入验证增强
 	if err := biz.ValidatePaymentIntentID(req.PaymentID); err != nil {
 		common.SendError(c, common.ErrValidationFailed.WithDetails(err.Error()))
 		return
@@ -298,7 +261,7 @@ func ConfirmStripePayment(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// UpdatePaymentConfig updates payment configuration
+// UpdatePaymentConfig 更新支付配置
 func UpdatePaymentConfig(ctx context.Context, c *app.RequestContext) {
 	var req models.UpdatePaymentConfigRequest
 	if err := c.BindAndValidate(&req); err != nil {
@@ -306,7 +269,7 @@ func UpdatePaymentConfig(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Enhanced input validation
+	// 输入验证增强
 	if err := biz.ValidateAmount(req.Amount); err != nil {
 		common.SendError(c, common.ErrValidationFailed.WithDetails(err.Error()))
 		return
@@ -327,7 +290,7 @@ func UpdatePaymentConfig(ctx context.Context, c *app.RequestContext) {
 	}
 
 	if req.Description == "" {
-		req.Description = "Payment amount configuration"
+		req.Description = "支付金额配置"
 	}
 
 	if db.DB == nil {
@@ -365,7 +328,7 @@ func UpdatePaymentConfig(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// GetPaymentConfig gets payment configuration
+// GetPaymentConfig 获取支付配置
 func GetPaymentConfig(ctx context.Context, c *app.RequestContext) {
 	currency := c.Query("currency")
 	if currency == "" {
@@ -394,7 +357,7 @@ func GetPaymentConfig(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// GetUserPaymentInfo gets user payment information
+// GetUserPaymentInfo 获取用户支付信息
 func GetUserPaymentInfo(ctx context.Context, c *app.RequestContext) {
 	userID := string(c.Param("user_id"))
 	if userID == "" {
@@ -421,7 +384,7 @@ func GetUserPaymentInfo(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, info)
 }
 
-// UpdatePaymentStatusFromFrontend updates payment status
+// UpdatePaymentStatusFromFrontend 更新支付状态
 func UpdatePaymentStatusFromFrontend(ctx context.Context, c *app.RequestContext) {
 	var req models.UpdatePaymentStatusRequest
 	if err := c.BindAndValidate(&req); err != nil {
@@ -453,17 +416,17 @@ func UpdatePaymentStatusFromFrontend(ctx context.Context, c *app.RequestContext)
 		if err := db.UpdatePaymentStatus(req.PaymentIntentID, actualStatus); err != nil {
 			zap.L().Warn("Failed to update payment status", zap.Error(err))
 		} else {
-			// Update cache (asynchronously)
+			// 更新缓存（异步）
 			if cache.IsAvailable() {
 				go func() {
-					// Update Stripe status cache (cache strategy based on status)
+					// 更新 Stripe 状态缓存（根据状态决定缓存策略）
 					updateStripeStatusCache(context.Background(), req.PaymentIntentID, intent)
 
-					// Find payment_id by payment_intent_id and update payment cache
-					payment, err := db.GetPaymentByPaymentID(req.PaymentIntentID)
+					// 通过 payment_intent_id 查找 payment_id 并更新支付缓存
+					payment, err := db.GetPaymentByIntentID(req.PaymentIntentID)
 					if err == nil && payment == nil {
-						// If not found by payment_intent_id, delete related cache
-						cache.DeletePayment(context.Background(), req.PaymentIntentID)
+						// 如果通过 payment_intent_id 找不到，删除相关缓存
+						cache.DeletePaymentByIntentID(context.Background(), req.PaymentIntentID)
 					} else if payment != nil {
 						cacheData := &cache.PaymentCacheData{
 							PaymentID:       payment.PaymentID,
@@ -485,12 +448,15 @@ func UpdatePaymentStatusFromFrontend(ctx context.Context, c *app.RequestContext)
 		}
 
 		if actualStatus == "succeeded" {
+			// 记录支付成功指标
+			common.RecordPayment("stripe", "succeeded", intent.Amount, string(intent.Currency), 0)
+
 			userID := intent.Metadata["user_id"]
 			if userID != "" {
 				if err := db.UpdateUserPaymentInfo(userID, intent.Amount); err != nil {
 					zap.L().Warn("Failed to update user payment info", zap.Error(err))
 				} else {
-					// Invalidate user payment cache
+					// 使用户支付缓存失效
 					if cache.IsAvailable() {
 						go func() {
 							cache.InvalidateUserPaymentCache(context.Background(), userID)
@@ -498,6 +464,9 @@ func UpdatePaymentStatusFromFrontend(ctx context.Context, c *app.RequestContext)
 					}
 				}
 			}
+		} else if actualStatus == "failed" || actualStatus == "canceled" {
+			// 记录支付失败或取消指标
+			common.RecordPayment("stripe", actualStatus, intent.Amount, string(intent.Currency), 0)
 		}
 	}
 
@@ -508,7 +477,7 @@ func UpdatePaymentStatusFromFrontend(ctx context.Context, c *app.RequestContext)
 	})
 }
 
-// GetUserPaymentHistory gets user payment history
+// GetUserPaymentHistory 获取用户支付历史
 func GetUserPaymentHistory(ctx context.Context, c *app.RequestContext) {
 	userID := string(c.Param("user_id"))
 	if userID == "" {
@@ -546,7 +515,7 @@ func GetUserPaymentHistory(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// RefundPayment processes a refund
+// RefundPayment 退款
 func RefundPayment(ctx context.Context, c *app.RequestContext) {
 	var req models.RefundRequest
 	if err := c.BindAndValidate(&req); err != nil || req.PaymentIntentID == "" {
@@ -596,18 +565,31 @@ func RefundPayment(ctx context.Context, c *app.RequestContext) {
 	})
 }
 
-// StripeWebhook handles Stripe webhook
+// StripeWebhook 处理Stripe webhook
 func StripeWebhook(ctx context.Context, c *app.RequestContext) {
 	cfg := conf.GetConf()
 
-	// Read request body
-	body, err := io.ReadAll(c.Request.BodyStream())
-	if err != nil {
-		common.SendError(c, common.ErrInvalidRequest.WithDetails("Invalid request body"))
+	// 读取请求体 - 使用 Body() 而不是 BodyStream()，确保获取原始请求体
+	// 注意：在 Hertz 中，如果中间件已经读取了 BodyStream()，需要使用 Body()
+	body := c.Request.Body()
+	if len(body) == 0 {
+		// 如果 Body() 为空，尝试从 BodyStream() 读取（可能中间件没有消耗）
+		var err error
+		body, err = io.ReadAll(c.Request.BodyStream())
+		if err != nil {
+			zap.L().Error("Failed to read request body", zap.Error(err))
+			common.SendError(c, common.ErrInvalidRequest.WithDetails("Invalid request body"))
+			return
+		}
+	}
+
+	if len(body) == 0 {
+		zap.L().Error("Request body is empty")
+		common.SendError(c, common.ErrInvalidRequest.WithDetails("Request body is empty"))
 		return
 	}
 
-	// Get signature header
+	// 获取签名头
 	signatureBytes := c.GetHeader("Stripe-Signature")
 	if len(signatureBytes) == 0 {
 		common.SendError(c, common.ErrInvalidRequest.WithDetails("Missing Stripe-Signature header"))
@@ -615,49 +597,151 @@ func StripeWebhook(ctx context.Context, c *app.RequestContext) {
 	}
 	signature := string(signatureBytes)
 
-	// Verify signature using Stripe official library
+	// 使用Stripe官方库验证签名
 	endpointSecret := cfg.Stripe.WebhookSecret
 	if endpointSecret == "" {
 		common.SendError(c, common.ErrInternalServer.WithDetails("Webhook secret not configured"))
 		return
 	}
 
-	event, err := webhook.ConstructEvent(body, signature, endpointSecret)
+	// 添加调试日志
+	zap.L().Debug("Webhook signature verification",
+		zap.String("signature_prefix", func() string {
+			if len(signature) > 20 {
+				return signature[:20] + "..."
+			}
+			return signature
+		}()),
+		zap.String("secret_prefix", func() string {
+			if len(endpointSecret) > 10 {
+				return endpointSecret[:10] + "..."
+			}
+			return endpointSecret
+		}()),
+		zap.Int("body_length", len(body)),
+	)
+
+	// 使用 ConstructEventWithOptions 以支持不同的 API 版本
+	// 忽略 API 版本不匹配，因为 Stripe Dashboard 可能使用较新的 API 版本
+	event, err := webhook.ConstructEventWithOptions(
+		body,
+		signature,
+		endpointSecret,
+		webhook.ConstructEventOptions{
+			IgnoreAPIVersionMismatch: true,
+		},
+	)
 	if err != nil {
-		common.SendError(c, common.ErrInvalidRequest.WithDetails("Invalid signature"))
+		zap.L().Error("Webhook signature verification failed",
+			zap.Error(err),
+			zap.String("error_details", err.Error()),
+			zap.String("signature_prefix", func() string {
+				if len(signature) > 20 {
+					return signature[:20] + "..."
+				}
+				return signature
+			}()),
+		)
+		common.SendError(c, common.ErrInvalidRequest.WithDetails("Invalid signature: "+err.Error()))
 		return
 	}
 
-	// Handle different types of events
+	// 优化3: 检查事件是否已处理（幂等性）
+	if cache.IsAvailable() {
+		processed, err := cache.IsWebhookEventProcessed(ctx, event.ID)
+		if err == nil && processed {
+			zap.L().Info("Webhook event already processed, skipping duplicate",
+				zap.String("event_id", event.ID),
+				zap.String("event_type", string(event.Type)))
+			// 事件已处理，直接返回成功（避免 Stripe 重试）
+			c.JSON(consts.StatusOK, utils.H{"received": true, "duplicate": true})
+			return
+		}
+	}
+
+	// 处理不同类型的事件
 	switch event.Type {
 	case "payment_intent.succeeded":
 		zap.L().Info("Payment succeeded", zap.String("event_id", event.ID))
 
-		// Parse PaymentIntent
+		// 解析 PaymentIntent
 		var pi stripe.PaymentIntent
 		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
 			zap.L().Error("Failed to parse payment intent", zap.Error(err))
 		} else {
-			// Update payment status in database
+			// 记录支付成功指标
+			common.RecordPayment("stripe", "succeeded", pi.Amount, string(pi.Currency), 0)
+
+			// 更新数据库中的支付状态
 			if db.DB != nil {
-				// Update payment history status
+				// 更新支付历史状态
 				if err := db.UpdatePaymentStatus(pi.ID, string(pi.Status)); err != nil {
 					zap.L().Warn("Failed to update payment status", zap.Error(err))
 				} else {
-					// Accuracy first: immediately update cache for final status to ensure accuracy
+					// 优化5: 最终状态也设置短期缓存（必须设置失效时间）
 					if cache.IsAvailable() {
 						go func() {
-							// Final status: delete cache, force next query to Stripe to get latest status
-							// This ensures the returned status is accurate
+							// 优化4: 从 metadata 获取 payment_id（避免查询数据库）
+							paymentID := pi.Metadata["payment_id"]
+
+							// 优化5: 最终状态设置短期缓存（5分钟），而不是删除
 							if cache.IsFinalStatus(string(pi.Status)) {
-								zap.L().Info("Final status in webhook, deleting cache for accuracy",
+								zap.L().Info("Final status in webhook, setting short-term cache",
 									zap.String("payment_intent_id", pi.ID),
-									zap.String("status", string(pi.Status)))
-								cache.DeleteStripeStatus(context.Background(), pi.ID)
-								// Delete payment cache, force next read from database
-								cache.DeletePayment(context.Background(), pi.ID)
+									zap.String("status", string(pi.Status)),
+									zap.String("payment_id", paymentID))
+
+								// 更新 Stripe 状态缓存（短期，5分钟）
+								stripeStatusData := &cache.StripeStatusCacheData{
+									PaymentIntentID: pi.ID,
+									Status:          string(pi.Status),
+									Amount:          pi.Amount,
+									Currency:        string(pi.Currency),
+									CachedAt:        time.Now().Format(time.RFC3339),
+								}
+								cache.SetStripeStatus(context.Background(), pi.ID, stripeStatusData, cache.FinalStatusCacheTTL)
+
+								// 更新支付缓存（短期，5分钟）
+								if paymentID != "" {
+									payment, err := db.GetPaymentByPaymentID(paymentID)
+									if err == nil && payment != nil {
+										cacheData := &cache.PaymentCacheData{
+											PaymentID:       payment.PaymentID,
+											PaymentIntentID: pi.ID,
+											UserID:          payment.UserID,
+											Amount:          pi.Amount,
+											Currency:        string(pi.Currency),
+											Status:          string(pi.Status),
+											PaymentMethod:   payment.PaymentMethod,
+											Description:     payment.Description,
+											CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+											UpdatedAt:       time.Now().Format(time.RFC3339),
+										}
+										cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+										cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+									}
+								} else {
+									// 如果 metadata 中没有 payment_id，回退到查询数据库
+									payment, err := db.GetPaymentByIntentID(pi.ID)
+									if err == nil && payment != nil {
+										cacheData := &cache.PaymentCacheData{
+											PaymentID:       payment.PaymentID,
+											PaymentIntentID: pi.ID,
+											UserID:          payment.UserID,
+											Amount:          pi.Amount,
+											Currency:        string(pi.Currency),
+											Status:          string(pi.Status),
+											PaymentMethod:   payment.PaymentMethod,
+											Description:     payment.Description,
+											CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+											UpdatedAt:       time.Now().Format(time.RFC3339),
+										}
+										cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+										cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+									}
+								}
 							} else {
-								// Intermediate status: update cache
+								// 中间状态：更新缓存
 								stripeStatusData := &cache.StripeStatusCacheData{
 									PaymentIntentID: pi.ID,
 									Status:          string(pi.Status),
@@ -672,20 +756,23 @@ func StripeWebhook(ctx context.Context, c *app.RequestContext) {
 					}
 				}
 
-				// Get user ID (from metadata)
+				// 获取用户ID（从 metadata 中）
 				userID := pi.Metadata["user_id"]
 				if userID != "" {
-					// Update user payment information
+					// 更新用户支付信息
 					if err := db.UpdateUserPaymentInfo(userID, pi.Amount); err != nil {
 						zap.L().Warn("Failed to update user payment info", zap.Error(err))
 					} else {
-						// Invalidate user payment cache
+						// 使用户支付缓存失效
 						if cache.IsAvailable() {
 							go func() {
 								cache.InvalidateUserPaymentCache(context.Background(), userID)
 							}()
 						}
 					}
+
+					// 触发支付成功后的业务逻辑（异步执行，不阻塞 Webhook 响应）
+					go handlePaymentSuccessBusinessLogic(userID, &pi)
 				}
 			}
 		}
@@ -693,38 +780,164 @@ func StripeWebhook(ctx context.Context, c *app.RequestContext) {
 	case "payment_intent.payment_failed":
 		zap.L().Info("Payment failed", zap.String("event_id", event.ID))
 
-		// Parse PaymentIntent and update status
+		// 解析 PaymentIntent 并更新状态
 		var pi stripe.PaymentIntent
-		if err := json.Unmarshal(event.Data.Raw, &pi); err == nil && db.DB != nil {
-			db.UpdatePaymentStatus(pi.ID, string(pi.Status))
-			// Accuracy first: delete cache for final status (failed) to ensure accuracy
-			if cache.IsAvailable() {
-				go func() {
-					zap.L().Info("Final status (failed) in webhook, deleting cache for accuracy",
-						zap.String("payment_intent_id", pi.ID),
-						zap.String("status", string(pi.Status)))
-					cache.DeleteStripeStatus(context.Background(), pi.ID)
-					cache.DeletePayment(context.Background(), pi.ID)
-				}()
+		if err := json.Unmarshal(event.Data.Raw, &pi); err == nil {
+			// 记录支付失败指标
+			common.RecordPayment("stripe", "failed", pi.Amount, string(pi.Currency), 0)
+
+			if db.DB != nil {
+				db.UpdatePaymentStatus(pi.ID, string(pi.Status))
+				// 优化5: 最终状态设置短期缓存（必须设置失效时间）
+				if cache.IsAvailable() {
+					go func() {
+						// 优化4: 从 metadata 获取 payment_id
+						paymentID := pi.Metadata["payment_id"]
+
+						zap.L().Info("Final status (failed) in webhook, setting short-term cache",
+							zap.String("payment_intent_id", pi.ID),
+							zap.String("status", string(pi.Status)),
+							zap.String("payment_id", paymentID))
+
+						// 更新 Stripe 状态缓存（短期，5分钟）
+						stripeStatusData := &cache.StripeStatusCacheData{
+							PaymentIntentID: pi.ID,
+							Status:          string(pi.Status),
+							Amount:          pi.Amount,
+							Currency:        string(pi.Currency),
+							CachedAt:        time.Now().Format(time.RFC3339),
+						}
+						cache.SetStripeStatus(context.Background(), pi.ID, stripeStatusData, cache.FinalStatusCacheTTL)
+
+						// 更新支付缓存（短期，5分钟）
+						if paymentID != "" {
+							payment, err := db.GetPaymentByPaymentID(paymentID)
+							if err == nil && payment != nil {
+								cacheData := &cache.PaymentCacheData{
+									PaymentID:       payment.PaymentID,
+									PaymentIntentID: pi.ID,
+									UserID:          payment.UserID,
+									Amount:          pi.Amount,
+									Currency:        string(pi.Currency),
+									Status:          string(pi.Status),
+									PaymentMethod:   payment.PaymentMethod,
+									Description:     payment.Description,
+									CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+									UpdatedAt:       time.Now().Format(time.RFC3339),
+								}
+								cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+								cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+							}
+						} else {
+							// 回退到查询数据库
+							payment, err := db.GetPaymentByIntentID(pi.ID)
+							if err == nil && payment != nil {
+								cacheData := &cache.PaymentCacheData{
+									PaymentID:       payment.PaymentID,
+									PaymentIntentID: pi.ID,
+									UserID:          payment.UserID,
+									Amount:          pi.Amount,
+									Currency:        string(pi.Currency),
+									Status:          string(pi.Status),
+									PaymentMethod:   payment.PaymentMethod,
+									Description:     payment.Description,
+									CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+									UpdatedAt:       time.Now().Format(time.RFC3339),
+								}
+								cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+								cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+							}
+						}
+					}()
+				}
+
+				// 触发支付失败后的业务逻辑（异步执行）
+				userID := pi.Metadata["user_id"]
+				if userID != "" {
+					go handlePaymentFailedBusinessLogic(userID, &pi)
+				}
 			}
 		}
 
 	case "payment_intent.canceled":
 		zap.L().Info("Payment canceled", zap.String("event_id", event.ID))
 
-		// Parse PaymentIntent and update status
+		// 解析 PaymentIntent 并更新状态
 		var pi stripe.PaymentIntent
-		if err := json.Unmarshal(event.Data.Raw, &pi); err == nil && db.DB != nil {
-			db.UpdatePaymentStatus(pi.ID, string(pi.Status))
-			// Accuracy first: delete cache for final status (canceled) to ensure accuracy
-			if cache.IsAvailable() {
-				go func() {
-					zap.L().Info("Final status (canceled) in webhook, deleting cache for accuracy",
-						zap.String("payment_intent_id", pi.ID),
-						zap.String("status", string(pi.Status)))
-					cache.DeleteStripeStatus(context.Background(), pi.ID)
-					cache.DeletePayment(context.Background(), pi.ID)
-				}()
+		if err := json.Unmarshal(event.Data.Raw, &pi); err == nil {
+			// 记录支付取消指标
+			common.RecordPayment("stripe", "canceled", pi.Amount, string(pi.Currency), 0)
+
+			if db.DB != nil {
+				db.UpdatePaymentStatus(pi.ID, string(pi.Status))
+				// 优化5: 最终状态设置短期缓存（必须设置失效时间）
+				if cache.IsAvailable() {
+					go func() {
+						// 优化4: 从 metadata 获取 payment_id
+						paymentID := pi.Metadata["payment_id"]
+
+						zap.L().Info("Final status (canceled) in webhook, setting short-term cache",
+							zap.String("payment_intent_id", pi.ID),
+							zap.String("status", string(pi.Status)),
+							zap.String("payment_id", paymentID))
+
+						// 更新 Stripe 状态缓存（短期，5分钟）
+						stripeStatusData := &cache.StripeStatusCacheData{
+							PaymentIntentID: pi.ID,
+							Status:          string(pi.Status),
+							Amount:          pi.Amount,
+							Currency:        string(pi.Currency),
+							CachedAt:        time.Now().Format(time.RFC3339),
+						}
+						cache.SetStripeStatus(context.Background(), pi.ID, stripeStatusData, cache.FinalStatusCacheTTL)
+
+						// 更新支付缓存（短期，5分钟）
+						if paymentID != "" {
+							payment, err := db.GetPaymentByPaymentID(paymentID)
+							if err == nil && payment != nil {
+								cacheData := &cache.PaymentCacheData{
+									PaymentID:       payment.PaymentID,
+									PaymentIntentID: pi.ID,
+									UserID:          payment.UserID,
+									Amount:          pi.Amount,
+									Currency:        string(pi.Currency),
+									Status:          string(pi.Status),
+									PaymentMethod:   payment.PaymentMethod,
+									Description:     payment.Description,
+									CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+									UpdatedAt:       time.Now().Format(time.RFC3339),
+								}
+								cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+								cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+							}
+						} else {
+							// 回退到查询数据库
+							payment, err := db.GetPaymentByIntentID(pi.ID)
+							if err == nil && payment != nil {
+								cacheData := &cache.PaymentCacheData{
+									PaymentID:       payment.PaymentID,
+									PaymentIntentID: pi.ID,
+									UserID:          payment.UserID,
+									Amount:          pi.Amount,
+									Currency:        string(pi.Currency),
+									Status:          string(pi.Status),
+									PaymentMethod:   payment.PaymentMethod,
+									Description:     payment.Description,
+									CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+									UpdatedAt:       time.Now().Format(time.RFC3339),
+								}
+								cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+								cache.SetPaymentByIntentID(context.Background(), pi.ID, cacheData, cache.FinalStatusCacheTTL)
+							}
+						}
+					}()
+				}
+
+				// 触发支付取消后的业务逻辑（异步执行）
+				userID := pi.Metadata["user_id"]
+				if userID != "" {
+					go handlePaymentCanceledBusinessLogic(userID, &pi)
+				}
 			}
 		}
 
@@ -732,10 +945,17 @@ func StripeWebhook(ctx context.Context, c *app.RequestContext) {
 		zap.L().Info("Unhandled event type", zap.String("type", string(event.Type)))
 	}
 
+	// 优化3: 标记事件已处理（在所有事件类型处理完成后）
+	if cache.IsAvailable() {
+		if err := cache.MarkWebhookEventProcessed(ctx, event.ID); err != nil {
+			zap.L().Warn("Failed to mark webhook event as processed", zap.Error(err), zap.String("event_id", event.ID))
+		}
+	}
+
 	c.JSON(consts.StatusOK, utils.H{"received": true})
 }
 
-// VerifyApplePurchase verifies Apple in-app purchase
+// VerifyApplePurchase 验证Apple内购
 func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 	var req models.AppleVerifyRequest
 	if err := c.BindAndValidate(&req); err != nil {
@@ -743,7 +963,7 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Enhanced input validation
+	// 输入验证增强
 	if err := biz.ValidateReceiptData(req.ReceiptData); err != nil {
 		common.SendError(c, common.ErrValidationFailed.WithDetails(err.Error()))
 		return
@@ -751,7 +971,7 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 
 	cfg := conf.GetConf()
 
-	// Prepare request data
+	// 准备请求数据
 	requestData := map[string]interface{}{
 		"receipt-data": req.ReceiptData,
 		"password":     cfg.Apple.SharedSecret,
@@ -759,7 +979,7 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 
 	jsonData, _ := json.Marshal(requestData)
 
-	// Try production environment first
+	// 先尝试生产环境
 	prodResp, err := http.Post(cfg.Apple.ProductionURL, "application/json",
 		io.NopCloser(strings.NewReader(string(jsonData))))
 	if err != nil {
@@ -768,7 +988,7 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 	}
 	defer prodResp.Body.Close()
 
-	// If production environment returns 21007 (sandbox receipt), request sandbox environment
+	// 如果生产环境返回 21007（沙盒收据），则请求沙盒环境
 	var verifyResp models.AppleVerifyResponse
 	if err := json.NewDecoder(prodResp.Body).Decode(&verifyResp); err != nil {
 		common.SendError(c, common.ErrExternalService.WithDetails("Failed to parse response"))
@@ -776,7 +996,7 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 	}
 
 	if verifyResp.Status == 21007 {
-		// Sandbox receipt, use sandbox URL
+		// 沙盒收据，使用沙盒 URL
 		sandboxResp, err := http.Post(cfg.Apple.SandboxURL, "application/json",
 			io.NopCloser(strings.NewReader(string(jsonData))))
 		if err != nil {
@@ -790,23 +1010,23 @@ func VerifyApplePurchase(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, verifyResp)
 }
 
-// VerifyAppleSubscription verifies Apple subscription
+// VerifyAppleSubscription 验证Apple订阅
 func VerifyAppleSubscription(ctx context.Context, c *app.RequestContext) {
-	// Similar to VerifyApplePurchase, specifically handles subscriptions
-	// Additional subscription verification logic is needed in actual implementation
+	// 类似于 VerifyApplePurchase，专门处理订阅
+	// 实际实现中需要额外的订阅验证逻辑
 	VerifyApplePurchase(ctx, c)
 }
 
-// AppleWebhook handles Apple webhook
+// AppleWebhook 处理Apple webhook
 func AppleWebhook(ctx context.Context, c *app.RequestContext) {
-	// Apple server-to-server notifications (App Store Server Notifications)
-	// Need to handle Apple webhook notifications here
+	// Apple 服务器到服务器的通知（App Store Server Notifications）
+	// 这里需要处理 Apple 的 webhook 通知
 	zap.L().Info("Received Apple webhook")
 
 	c.JSON(consts.StatusOK, utils.H{"received": true})
 }
 
-// GetPaymentStatus gets payment status (with Redis cache)
+// GetPaymentStatus 获取支付状态（带 Redis 缓存）
 func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 	common.LogStage(c, "request_received", zap.String("handler", "GetPaymentStatus"))
 
@@ -820,7 +1040,7 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 	common.LogStage(c, "payment_status_query_started", zap.String("payment_id", paymentID))
 	zap.L().Info("GetPaymentStatus called", zap.String("payment_id", paymentID))
 
-	// 1. First try to get payment information from Redis cache
+	// 1. 先尝试从 Redis 缓存获取支付信息
 	common.LogStage(c, "checking_cache", zap.String("payment_id", paymentID))
 	if cache.IsAvailable() {
 		cachedData, err := cache.GetPayment(ctx, paymentID)
@@ -828,28 +1048,28 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 			common.LogStage(c, "cache_hit", zap.String("payment_id", paymentID))
 			zap.L().Info("Payment found in cache", zap.String("payment_id", paymentID))
 
-			// 1.1 First check Stripe status cache (accuracy-first strategy)
+			// 1.1 先检查 Stripe 状态缓存（优化2: 优先查数据库，优化5: 最终状态也缓存）
 			if cachedData.PaymentIntentID != "" {
 				stripeStatus, err := cache.GetStripeStatus(ctx, cachedData.PaymentIntentID)
 				if err == nil && stripeStatus != nil {
-					// Accuracy first: final status must be queried in real-time, do not use cache
+					// 优化2: 最终状态优先查数据库（Webhook 已保证准确性）
 					if cache.IsFinalStatus(stripeStatus.Status) {
-						zap.L().Info("Final status detected, bypassing cache for accuracy",
+						zap.L().Info("Final status in cache, checking database first (webhook guaranteed accuracy)",
 							zap.String("payment_intent_id", cachedData.PaymentIntentID),
 							zap.String("status", stripeStatus.Status))
-						// Final status: must query Stripe to get latest status, do not use cache
-						// Continue to Stripe API query below
+						// 优化2: 优先查数据库，如果数据库有最终状态，直接返回
+						// 继续执行到数据库查询
 					} else {
-						// Intermediate status: can use cache, but adopt stale-while-revalidate strategy
+						// 中间状态：可以使用缓存，但采用 stale-while-revalidate 策略
 						zap.L().Info("Stripe status cache hit (intermediate status)",
 							zap.String("payment_intent_id", cachedData.PaymentIntentID),
 							zap.String("status", stripeStatus.Status))
 
-						// Check if there is a status change event
+						// 检查是否有状态变化事件
 						statusChangeEvent, _ := cache.GetStatusChangeEvent(ctx, cachedData.PaymentIntentID)
 						hasStatusChange := statusChangeEvent != nil
 
-						// Immediately return cached data (fast response)
+						// 立即返回缓存数据（快速响应）
 						response := utils.H{
 							"payment_id":        cachedData.PaymentID,
 							"payment_intent_id": stripeStatus.PaymentIntentID,
@@ -857,7 +1077,7 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 							"amount":            stripeStatus.Amount,
 							"currency":          stripeStatus.Currency,
 							"source":            "cache",
-							"cached":            true, // Indicates this is cached data
+							"cached":            true, // 标识这是缓存数据
 						}
 
 						// 如果有状态变化，提示客户端重新查询
@@ -931,80 +1151,276 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 				"amount":            cachedData.Amount,
 				"currency":          cachedData.Currency,
 				"source":            "cache",
+				"cached":            true, // 标识这是缓存数据
 			})
 			return
 		}
 	}
 
-	// 2. 缓存未命中，从数据库查询
-	common.LogStage(c, "cache_miss_querying_database", zap.String("payment_id", paymentID))
+	// 优化2: 优先查询数据库（Webhook 已更新，保证准确性）
+	common.LogStage(c, "querying_database_priority", zap.String("payment_id", paymentID))
 	var paymentIntentID string
 	var dbStatus string
 	var dbAmount int64
 	var dbCurrency string
 	var payment *db.PaymentHistory
 
-	if db.DB == nil {
-		common.LogStageWithLevel(c, zapcore.WarnLevel, "database_unavailable", zap.String("payment_id", paymentID))
-		zap.L().Warn("Database not available for GetPaymentStatus", zap.String("payment_id", paymentID))
-	} else {
-		var err error
-		common.LogStage(c, "querying_database", zap.String("payment_id", paymentID))
-		payment, err = db.GetPaymentByPaymentID(paymentID)
-		if err != nil {
-			common.LogStageWithLevel(c, zapcore.WarnLevel, "database_query_failed", zap.Error(err), zap.String("payment_id", paymentID))
-			zap.L().Warn("Failed to get payment from database", zap.Error(err), zap.String("payment_id", paymentID))
-		} else if payment != nil {
-			common.LogStage(c, "database_query_success",
-				zap.String("payment_id", paymentID),
-				zap.String("payment_intent_id", payment.PaymentIntentID),
-				zap.String("status", payment.Status))
-			zap.L().Info("Found payment in database",
-				zap.String("payment_id", paymentID),
-				zap.String("payment_intent_id", payment.PaymentIntentID),
-				zap.String("status", payment.Status))
-			paymentIntentID = payment.PaymentIntentID
-			dbStatus = payment.Status
-			dbAmount = payment.Amount
-			dbCurrency = payment.Currency
+	// 优化2: 如果 paymentID 是 payment_intent_id（以 pi_ 开头），直接用 GetPaymentByIntentID 查询
+	if len(paymentID) > 3 && paymentID[:3] == "pi_" {
+		paymentIntentID = paymentID
+		if db.DB != nil {
+			common.LogStage(c, "querying_database_by_intent_id", zap.String("payment_intent_id", paymentIntentID))
+			var err error
+			payment, err = db.GetPaymentByIntentID(paymentIntentID)
+			if err != nil {
+				common.LogStageWithLevel(c, zapcore.WarnLevel, "database_query_failed", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
+				zap.L().Warn("Failed to get payment from database by intent_id", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
+			} else if payment != nil {
+				common.LogStage(c, "database_query_success",
+					zap.String("payment_id", payment.PaymentID),
+					zap.String("payment_intent_id", paymentIntentID),
+					zap.String("status", payment.Status))
+				zap.L().Info("Found payment in database by intent_id",
+					zap.String("payment_id", payment.PaymentID),
+					zap.String("payment_intent_id", paymentIntentID),
+					zap.String("status", payment.Status))
+				dbStatus = payment.Status
+				dbAmount = payment.Amount
+				dbCurrency = payment.Currency
 
-			// Update cache (asynchronously)
-			if cache.IsAvailable() && payment != nil {
-				go func() {
-					cacheData := &cache.PaymentCacheData{
-						PaymentID:       payment.PaymentID,
-						PaymentIntentID: payment.PaymentIntentID,
-						UserID:          payment.UserID,
-						Amount:          payment.Amount,
-						Currency:        payment.Currency,
-						Status:          payment.Status,
-						PaymentMethod:   payment.PaymentMethod,
-						Description:     payment.Description,
-						CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
-						UpdatedAt:       payment.UpdatedAt.Format(time.RFC3339),
+				// 优化2: 如果是最终状态，直接返回数据库状态（Webhook 已保证准确性）
+				if cache.IsFinalStatus(dbStatus) {
+					zap.L().Info("Final status from database (intent_id query), returning directly (webhook guaranteed accuracy)",
+						zap.String("payment_id", payment.PaymentID),
+						zap.String("payment_intent_id", paymentIntentID),
+						zap.String("status", dbStatus),
+						zap.String("source", "database"))
+
+					// 更新缓存（短期，5分钟）
+					if cache.IsAvailable() {
+						go func() {
+							cacheData := &cache.PaymentCacheData{
+								PaymentID:       payment.PaymentID,
+								PaymentIntentID: payment.PaymentIntentID,
+								UserID:          payment.UserID,
+								Amount:          payment.Amount,
+								Currency:        payment.Currency,
+								Status:          payment.Status,
+								PaymentMethod:   payment.PaymentMethod,
+								Description:     payment.Description,
+								CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+								UpdatedAt:       payment.UpdatedAt.Format(time.RFC3339),
+							}
+							// 优化5: 最终状态使用短期缓存（必须设置失效时间）
+							cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.FinalStatusCacheTTL)
+							cache.SetPaymentByIntentID(context.Background(), paymentIntentID, cacheData, cache.FinalStatusCacheTTL)
+
+							stripeStatusData := &cache.StripeStatusCacheData{
+								PaymentIntentID: paymentIntentID,
+								Status:          payment.Status,
+								Amount:          payment.Amount,
+								Currency:        payment.Currency,
+								CachedAt:        time.Now().Format(time.RFC3339),
+							}
+							cache.SetStripeStatus(context.Background(), paymentIntentID, stripeStatusData, cache.FinalStatusCacheTTL)
+						}()
 					}
-					cache.SetPayment(context.Background(), paymentID, cacheData, cache.DefaultPaymentCacheTTL)
-				}()
+
+					// 直接返回数据库状态（Webhook 已保证准确性，无需查询 Stripe）
+					c.JSON(consts.StatusOK, utils.H{
+						"payment_id":        payment.PaymentID,
+						"payment_intent_id": paymentIntentID,
+						"status":            dbStatus,
+						"amount":            dbAmount,
+						"currency":          dbCurrency,
+						"source":            "database", // Webhook 已更新，保证准确性
+						"cached":            false,
+					})
+					return
+				}
+
+				// 中间状态：更新缓存，但需要查询 Stripe 验证
+				if cache.IsAvailable() {
+					go func() {
+						cacheData := &cache.PaymentCacheData{
+							PaymentID:       payment.PaymentID,
+							PaymentIntentID: payment.PaymentIntentID,
+							UserID:          payment.UserID,
+							Amount:          payment.Amount,
+							Currency:        payment.Currency,
+							Status:          payment.Status,
+							PaymentMethod:   payment.PaymentMethod,
+							Description:     payment.Description,
+							CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+							UpdatedAt:       payment.UpdatedAt.Format(time.RFC3339),
+						}
+						cache.SetPayment(context.Background(), payment.PaymentID, cacheData, cache.DefaultPaymentCacheTTL)
+						cache.SetPaymentByIntentID(context.Background(), paymentIntentID, cacheData, cache.DefaultPaymentCacheTTL)
+					}()
+				}
+			} else {
+				zap.L().Info("Payment not found in database by intent_id", zap.String("payment_intent_id", paymentIntentID))
 			}
+		}
+	} else {
+		// 使用 payment_id 查询
+		if db.DB == nil {
+			common.LogStageWithLevel(c, zapcore.WarnLevel, "database_unavailable", zap.String("payment_id", paymentID))
+			zap.L().Warn("Database not available for GetPaymentStatus", zap.String("payment_id", paymentID))
 		} else {
-			zap.L().Info("Payment not found in database", zap.String("payment_id", paymentID))
+			var err error
+			common.LogStage(c, "querying_database", zap.String("payment_id", paymentID))
+			payment, err = db.GetPaymentByPaymentID(paymentID)
+			if err != nil {
+				common.LogStageWithLevel(c, zapcore.WarnLevel, "database_query_failed", zap.Error(err), zap.String("payment_id", paymentID))
+				zap.L().Warn("Failed to get payment from database", zap.Error(err), zap.String("payment_id", paymentID))
+			} else if payment != nil {
+				common.LogStage(c, "database_query_success",
+					zap.String("payment_id", paymentID),
+					zap.String("payment_intent_id", payment.PaymentIntentID),
+					zap.String("status", payment.Status))
+				zap.L().Info("Found payment in database",
+					zap.String("payment_id", paymentID),
+					zap.String("payment_intent_id", payment.PaymentIntentID),
+					zap.String("status", payment.Status))
+				paymentIntentID = payment.PaymentIntentID
+				dbStatus = payment.Status
+				dbAmount = payment.Amount
+				dbCurrency = payment.Currency
+
+				// 优化2: 如果是最终状态，直接返回数据库状态（Webhook 已保证准确性）
+				if cache.IsFinalStatus(dbStatus) {
+					zap.L().Info("Final status from database, returning directly (webhook guaranteed accuracy)",
+						zap.String("payment_id", paymentID),
+						zap.String("status", dbStatus),
+						zap.String("source", "database"))
+
+					// 更新缓存（短期，5分钟）
+					if cache.IsAvailable() {
+						go func() {
+							cacheData := &cache.PaymentCacheData{
+								PaymentID:       payment.PaymentID,
+								PaymentIntentID: payment.PaymentIntentID,
+								UserID:          payment.UserID,
+								Amount:          payment.Amount,
+								Currency:        payment.Currency,
+								Status:          payment.Status,
+								PaymentMethod:   payment.PaymentMethod,
+								Description:     payment.Description,
+								CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+								UpdatedAt:       payment.UpdatedAt.Format(time.RFC3339),
+							}
+							// 优化5: 最终状态使用短期缓存（必须设置失效时间）
+							cache.SetPayment(context.Background(), paymentID, cacheData, cache.FinalStatusCacheTTL)
+
+							// 同时更新 Stripe 状态缓存
+							stripeStatusData := &cache.StripeStatusCacheData{
+								PaymentIntentID: payment.PaymentIntentID,
+								Status:          payment.Status,
+								Amount:          payment.Amount,
+								Currency:        payment.Currency,
+								CachedAt:        time.Now().Format(time.RFC3339),
+							}
+							cache.SetStripeStatus(context.Background(), payment.PaymentIntentID, stripeStatusData, cache.FinalStatusCacheTTL)
+						}()
+					}
+
+					// 直接返回数据库状态（Webhook 已保证准确性，无需查询 Stripe）
+					c.JSON(consts.StatusOK, utils.H{
+						"payment_id":        paymentID,
+						"payment_intent_id": paymentIntentID,
+						"status":            dbStatus,
+						"amount":            dbAmount,
+						"currency":          dbCurrency,
+						"source":            "database", // Webhook 已更新，保证准确性
+						"cached":            false,
+					})
+					return
+				}
+
+				// 中间状态：更新缓存，但需要查询 Stripe 验证
+				if cache.IsAvailable() {
+					go func() {
+						cacheData := &cache.PaymentCacheData{
+							PaymentID:       payment.PaymentID,
+							PaymentIntentID: payment.PaymentIntentID,
+							UserID:          payment.UserID,
+							Amount:          payment.Amount,
+							Currency:        payment.Currency,
+							Status:          payment.Status,
+							PaymentMethod:   payment.PaymentMethod,
+							Description:     payment.Description,
+							CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
+							UpdatedAt:       payment.UpdatedAt.Format(time.RFC3339),
+						}
+						cache.SetPayment(context.Background(), paymentID, cacheData, cache.DefaultPaymentCacheTTL)
+					}()
+				}
+			} else {
+				zap.L().Info("Payment not found in database", zap.String("payment_id", paymentID))
+			}
 		}
 	}
 
 	// 3. 如果找到了payment_intent_id，查询 Stripe 获取最新状态（准确性优先）
 	if paymentIntentID != "" {
 		common.LogStage(c, "querying_stripe", zap.String("payment_intent_id", paymentIntentID))
-		// 3.1 先检查 Stripe 状态缓存（仅用于中间状态）
+		// 3.1 先检查 Stripe 状态缓存（优化：信任 Webhook 设置的最终状态缓存）
 		if cache.IsAvailable() {
 			common.LogStage(c, "checking_stripe_status_cache", zap.String("payment_intent_id", paymentIntentID))
 			stripeStatus, err := cache.GetStripeStatus(ctx, paymentIntentID)
 			if err == nil && stripeStatus != nil {
-				// 准确性优先：最终状态必须实时查询
+				// 优化：如果缓存中有最终状态，信任缓存（Webhook 已设置），直接返回，避免 Stripe API 调用
+				// 同时后台验证数据库状态，确保准确性
 				if cache.IsFinalStatus(stripeStatus.Status) {
-					zap.L().Info("Final status in cache, querying Stripe for accuracy",
+					zap.L().Info("Final status in cache (webhook guaranteed), returning directly to avoid Stripe API call",
 						zap.String("payment_intent_id", paymentIntentID),
-						zap.String("cached_status", stripeStatus.Status))
-					// 继续查询 Stripe 获取最新状态
+						zap.String("cached_status", stripeStatus.Status),
+						zap.String("source", "cache"))
+
+					// 后台异步验证数据库状态（确保准确性，但不阻塞响应）
+					if db.DB != nil {
+						go func() {
+							// 验证数据库状态是否与缓存一致
+							dbPayment, err := db.GetPaymentByIntentID(paymentIntentID)
+							if err == nil && dbPayment != nil {
+								if dbPayment.Status != stripeStatus.Status {
+									// 发现不一致，记录告警
+									zap.L().Warn("Cache and database status mismatch detected",
+										zap.String("payment_intent_id", paymentIntentID),
+										zap.String("cached_status", stripeStatus.Status),
+										zap.String("database_status", dbPayment.Status))
+									// 更新缓存以数据库为准（数据库是权威来源）
+									stripeStatusData := &cache.StripeStatusCacheData{
+										PaymentIntentID: paymentIntentID,
+										Status:          dbPayment.Status,
+										Amount:          dbPayment.Amount,
+										Currency:        dbPayment.Currency,
+										CachedAt:        time.Now().Format(time.RFC3339),
+									}
+									cache.SetStripeStatus(context.Background(), paymentIntentID, stripeStatusData, cache.FinalStatusCacheTTL)
+								}
+							} else if err != nil {
+								// 数据库查询失败，但缓存存在（可能是连接问题）
+								// 记录日志但不影响，因为缓存是可靠的（Webhook 已设置）
+								zap.L().Debug("Database verification failed (cache is still reliable)",
+									zap.String("payment_intent_id", paymentIntentID),
+									zap.Error(err))
+							}
+						}()
+					}
+
+					// 直接返回缓存中的最终状态（Webhook 已保证准确性）
+					c.JSON(consts.StatusOK, utils.H{
+						"payment_id":        paymentID,
+						"payment_intent_id": stripeStatus.PaymentIntentID,
+						"status":            stripeStatus.Status,
+						"amount":            stripeStatus.Amount,
+						"currency":          stripeStatus.Currency,
+						"source":            "cache", // Webhook 已更新，保证准确性
+						"cached":            true,
+					})
+					return
 				} else {
 					// 中间状态：可以使用缓存，但后台验证
 					zap.L().Info("Stripe status cache hit (intermediate status, from database path)",
@@ -1107,26 +1523,73 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// 4. 如果payment_id看起来像Stripe的payment_intent_id（以pi_开头），查询 Stripe（准确性优先）
-	if len(paymentID) > 3 && paymentID[:3] == "pi_" {
-		// 4.1 先检查 Stripe 状态缓存（仅用于中间状态）
+	// 4. 如果payment_id看起来像Stripe的payment_intent_id（以pi_开头），但前面没找到，检查缓存并查询Stripe
+	if len(paymentID) > 3 && paymentID[:3] == "pi_" && paymentIntentID == "" {
+		paymentIntentID = paymentID
+
+		// 4.1 先检查 Stripe 状态缓存（优化：信任 Webhook 设置的最终状态缓存）
 		if cache.IsAvailable() {
-			stripeStatus, err := cache.GetStripeStatus(ctx, paymentID)
+			stripeStatus, err := cache.GetStripeStatus(ctx, paymentIntentID)
 			if err == nil && stripeStatus != nil {
-				// 准确性优先：最终状态必须实时查询
+				// 优化：如果缓存中有最终状态，信任缓存（Webhook 已设置），直接返回，避免 Stripe API 调用
+				// 同时后台验证数据库状态，确保准确性
 				if cache.IsFinalStatus(stripeStatus.Status) {
-					zap.L().Info("Final status in cache, querying Stripe for accuracy",
-						zap.String("payment_intent_id", paymentID),
-						zap.String("cached_status", stripeStatus.Status))
-					// 继续查询 Stripe
+					zap.L().Info("Final status in cache (webhook guaranteed), returning directly to avoid Stripe API call",
+						zap.String("payment_intent_id", paymentIntentID),
+						zap.String("cached_status", stripeStatus.Status),
+						zap.String("source", "cache"))
+
+					// 后台异步验证数据库状态（确保准确性，但不阻塞响应）
+					if db.DB != nil {
+						go func() {
+							// 验证数据库状态是否与缓存一致
+							dbPayment, err := db.GetPaymentByIntentID(paymentIntentID)
+							if err == nil && dbPayment != nil {
+								if dbPayment.Status != stripeStatus.Status {
+									// 发现不一致，记录告警
+									zap.L().Warn("Cache and database status mismatch detected",
+										zap.String("payment_intent_id", paymentIntentID),
+										zap.String("cached_status", stripeStatus.Status),
+										zap.String("database_status", dbPayment.Status))
+									// 更新缓存以数据库为准（数据库是权威来源）
+									stripeStatusData := &cache.StripeStatusCacheData{
+										PaymentIntentID: paymentIntentID,
+										Status:          dbPayment.Status,
+										Amount:          dbPayment.Amount,
+										Currency:        dbPayment.Currency,
+										CachedAt:        time.Now().Format(time.RFC3339),
+									}
+									cache.SetStripeStatus(context.Background(), paymentIntentID, stripeStatusData, cache.FinalStatusCacheTTL)
+								}
+							} else if err != nil {
+								// 数据库查询失败，但缓存存在（可能是连接问题）
+								// 记录日志但不影响，因为缓存是可靠的（Webhook 已设置）
+								zap.L().Debug("Database verification failed (cache is still reliable)",
+									zap.String("payment_intent_id", paymentIntentID),
+									zap.Error(err))
+							}
+						}()
+					}
+
+					// 直接返回缓存中的最终状态（Webhook 已保证准确性）
+					c.JSON(consts.StatusOK, utils.H{
+						"payment_id":        paymentID,
+						"payment_intent_id": stripeStatus.PaymentIntentID,
+						"status":            stripeStatus.Status,
+						"amount":            stripeStatus.Amount,
+						"currency":          stripeStatus.Currency,
+						"source":            "cache", // Webhook 已更新，保证准确性
+						"cached":            true,
+					})
+					return
 				} else {
 					// 中间状态：可以使用缓存，但后台验证
 					zap.L().Info("Stripe status cache hit (intermediate status, direct payment_intent_id)",
-						zap.String("payment_intent_id", paymentID),
+						zap.String("payment_intent_id", paymentIntentID),
 						zap.String("status", stripeStatus.Status))
 
 					// 检查是否有状态变化事件
-					statusChangeEvent, _ := cache.GetStatusChangeEvent(ctx, paymentID)
+					statusChangeEvent, _ := cache.GetStatusChangeEvent(ctx, paymentIntentID)
 					hasStatusChange := statusChangeEvent != nil
 
 					response := utils.H{
@@ -1151,17 +1614,17 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 
 					// 后台异步验证
 					go func() {
-						intent, err := getPaymentService().GetPaymentIntent(paymentID)
+						intent, err := getPaymentService().GetPaymentIntent(paymentIntentID)
 						if err == nil {
 							// 如果状态发生变化，记录状态变化事件
 							if string(intent.Status) != stripeStatus.Status {
 								cache.RecordStatusChange(context.Background(),
-									paymentID,
+									paymentIntentID,
 									stripeStatus.Status,
 									string(intent.Status),
 									"revalidate")
 							}
-							updateStripeStatusCache(context.Background(), paymentID, intent)
+							updateStripeStatusCache(context.Background(), paymentIntentID, intent)
 						}
 					}()
 					return
@@ -1170,7 +1633,7 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 		}
 
 		// 4.2 查询 Stripe API 获取最新状态（保证准确性）
-		intent, err := getPaymentService().GetPaymentIntent(paymentID)
+		intent, err := getPaymentService().GetPaymentIntent(paymentIntentID)
 		if err != nil {
 			common.SendError(c, common.ErrPaymentNotFound)
 			return
@@ -1179,7 +1642,7 @@ func GetPaymentStatus(ctx context.Context, c *app.RequestContext) {
 		// 4.3 更新缓存（根据状态决定缓存策略）
 		if cache.IsAvailable() {
 			go func() {
-				updateStripeStatusCache(context.Background(), paymentID, intent)
+				updateStripeStatusCache(context.Background(), paymentIntentID, intent)
 			}()
 		}
 
@@ -1238,7 +1701,7 @@ func CheckStatusChange(ctx context.Context, c *app.RequestContext) {
 	}
 }
 
-// updateStripeStatusCache 更新 Stripe 状态缓存（根据状态决定缓存策略）
+// updateStripeStatusCache 更新 Stripe 状态缓存（优化5: 所有缓存都必须设置失效时间）
 func updateStripeStatusCache(ctx context.Context, paymentIntentID string, intent *stripe.PaymentIntent) {
 	if !cache.IsAvailable() {
 		return
@@ -1246,17 +1709,22 @@ func updateStripeStatusCache(ctx context.Context, paymentIntentID string, intent
 
 	status := string(intent.Status)
 
-	// 准确性优先：最终状态不缓存或极短时间缓存
+	// 优化5: 最终状态也设置短期缓存（必须设置失效时间，不允许永久缓存）
 	if cache.IsFinalStatus(status) {
-		// 最终状态：不缓存或极短时间缓存（5秒）
-		// 这样可以避免返回过时的最终状态
-		zap.L().Debug("Final status detected, using short TTL or no cache",
+		// 最终状态：设置短期缓存（5分钟），必须设置失效时间
+		zap.L().Debug("Final status detected, setting short-term cache (5 minutes)",
 			zap.String("payment_intent_id", paymentIntentID),
 			zap.String("status", status))
 
-		// 可以选择不缓存，或者缓存极短时间
-		// 这里选择不缓存最终状态，确保准确性
-		cache.DeleteStripeStatus(ctx, paymentIntentID)
+		stripeStatusData := &cache.StripeStatusCacheData{
+			PaymentIntentID: paymentIntentID,
+			Status:          status,
+			Amount:          intent.Amount,
+			Currency:        string(intent.Currency),
+			CachedAt:        time.Now().Format(time.RFC3339),
+		}
+		// 优化5: 使用短期缓存（5分钟），必须设置失效时间
+		cache.SetStripeStatus(ctx, paymentIntentID, stripeStatusData, cache.FinalStatusCacheTTL)
 		return
 	}
 
@@ -1279,7 +1747,7 @@ func updateStripeStatusCache(ctx context.Context, paymentIntentID string, intent
 	}
 }
 
-// updateCacheFromStripe 从 Stripe 更新缓存
+// updateCacheFromStripe 从 Stripe 更新缓存（优化5: 所有缓存都必须设置失效时间）
 func updateCacheFromStripe(ctx context.Context, paymentID, paymentIntentID string, intent *stripe.PaymentIntent) {
 	if !cache.IsAvailable() {
 		return
@@ -1304,8 +1772,17 @@ func updateCacheFromStripe(ctx context.Context, paymentID, paymentIntentID strin
 				CreatedAt:       payment.CreatedAt.Format(time.RFC3339),
 				UpdatedAt:       time.Now().Format(time.RFC3339),
 			}
-			cache.SetPayment(ctx, paymentID, cacheData, cache.DefaultPaymentCacheTTL)
-			cache.SetPaymentByIntentID(ctx, paymentIntentID, cacheData, cache.DefaultPaymentCacheTTL)
+
+			// 优化5: 根据状态决定缓存时间，最终状态使用短期缓存（必须设置失效时间）
+			var ttl time.Duration
+			if cache.IsFinalStatus(string(intent.Status)) {
+				ttl = cache.FinalStatusCacheTTL // 最终状态：5分钟
+			} else {
+				ttl = cache.DefaultPaymentCacheTTL // 中间状态：30分钟
+			}
+
+			cache.SetPayment(ctx, paymentID, cacheData, ttl)
+			cache.SetPaymentByIntentID(ctx, paymentIntentID, cacheData, ttl)
 		}
 	}
 }
@@ -1317,4 +1794,82 @@ func formatAmount(amount int64) string {
 		return strconv.FormatInt(int64(dollars), 10)
 	}
 	return strconv.FormatFloat(dollars, 'f', 2, 64)
+}
+
+// handlePaymentSuccessBusinessLogic 处理支付成功后的业务逻辑
+// 这个函数在 Webhook 中异步执行，不阻塞 Webhook 响应
+func handlePaymentSuccessBusinessLogic(userID string, pi *stripe.PaymentIntent) {
+	zap.L().Info("Processing payment success business logic",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+		zap.Int64("amount", pi.Amount),
+	)
+
+	// TODO: 在这里添加你的业务逻辑
+	// 以下是示例，你可以根据实际需求修改或扩展：
+
+	// 1. 激活用户服务/会员（示例）
+	// ctx := context.Background()
+	// activateUserService(ctx, userID, pi)
+
+	// 2. 发送确认邮件（示例）
+	// sendPaymentConfirmationEmail(userID, pi)
+
+	// 3. 更新订单状态（示例）
+	// updateOrderStatus(userID, pi)
+
+	// 4. 发放积分或优惠券（示例）
+	// grantRewards(userID, pi)
+
+	// 5. 记录业务日志（示例）
+	// logBusinessEvent("payment_success", userID, pi)
+
+	zap.L().Info("Payment success business logic completed",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+	)
+}
+
+// handlePaymentFailedBusinessLogic 处理支付失败后的业务逻辑
+func handlePaymentFailedBusinessLogic(userID string, pi *stripe.PaymentIntent) {
+	ctx := context.Background()
+
+	zap.L().Info("Processing payment failed business logic",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+	)
+
+	// TODO: 在这里添加你的业务逻辑
+	// 例如：
+	// 1. 发送失败通知邮件
+	// 2. 记录失败原因
+	// 3. 引导用户重试
+
+	_ = ctx // 避免未使用变量警告
+	zap.L().Info("Payment failed business logic completed",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+	)
+}
+
+// handlePaymentCanceledBusinessLogic 处理支付取消后的业务逻辑
+func handlePaymentCanceledBusinessLogic(userID string, pi *stripe.PaymentIntent) {
+	ctx := context.Background()
+
+	zap.L().Info("Processing payment canceled business logic",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+	)
+
+	// TODO: 在这里添加你的业务逻辑
+	// 例如：
+	// 1. 释放库存
+	// 2. 取消相关订单
+	// 3. 发送取消通知
+
+	_ = ctx // 避免未使用变量警告
+	zap.L().Info("Payment canceled business logic completed",
+		zap.String("user_id", userID),
+		zap.String("payment_intent_id", pi.ID),
+	)
 }

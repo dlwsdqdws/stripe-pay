@@ -11,31 +11,31 @@ func TestGetCurrentPricing(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	// 在实际测试环境中，应该先初始化配置
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
-
+	
 	pricing, err := service.GetCurrentPricing()
 	if err != nil {
 		t.Fatalf("GetCurrentPricing() failed: %v", err)
 	}
-
+	
 	// 验证返回的定价信息
 	if pricing == nil {
 		t.Fatal("GetCurrentPricing() returned nil")
 	}
-
+	
 	if pricing.Amount <= 0 {
 		t.Errorf("Expected amount > 0, got %d", pricing.Amount)
 	}
-
+	
 	if pricing.Currency == "" {
 		t.Error("Expected currency to be set")
 	}
-
+	
 	if pricing.Label == "" {
 		t.Error("Expected label to be set")
 	}
-
+	
 	// 验证默认值（如果数据库不可用）
 	if pricing.Currency != "hkd" && pricing.Currency != "" {
 		t.Errorf("Expected default currency to be 'hkd', got '%s'", pricing.Currency)
@@ -46,9 +46,9 @@ func TestGetCurrentPricing(t *testing.T) {
 func TestCheckUserPaymentValidity_NoPayment(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
-
+	
 	// 测试不存在的用户（数据库可能不可用，但应该返回Valid=false）
 	validity, err := service.CheckUserPaymentValidity("non_existent_user")
 	if err != nil {
@@ -56,11 +56,11 @@ func TestCheckUserPaymentValidity_NoPayment(t *testing.T) {
 		t.Logf("Database not available (expected in test): %v", err)
 		return
 	}
-
+	
 	if validity == nil {
 		t.Fatal("CheckUserPaymentValidity() returned nil")
 	}
-
+	
 	if validity.Valid {
 		t.Error("Expected Valid=false for non-existent user")
 	}
@@ -70,20 +70,20 @@ func TestCheckUserPaymentValidity_NoPayment(t *testing.T) {
 func TestCheckUserPaymentValidity_ExpiredPayment(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
-
+	
 	// 这个测试需要数据库支持，如果数据库不可用则跳过
 	validity, err := service.CheckUserPaymentValidity("test_user_expired")
 	if err != nil {
 		t.Logf("Skipping test - database not available: %v", err)
 		return
 	}
-
+	
 	if validity == nil {
 		t.Fatal("CheckUserPaymentValidity() returned nil")
 	}
-
+	
 	// 如果用户支付已过期，Valid应该为false
 	// 这个测试依赖于数据库中的实际数据
 	t.Logf("Payment validity check result: Valid=%v", validity.Valid)
@@ -95,16 +95,16 @@ func TestCheckIdempotency_EmptyKey(t *testing.T) {
 	// 但是空密钥的情况可以在没有配置的情况下测试
 	// 由于NewPaymentService需要配置，我们跳过这个测试
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	// 空密钥应该返回nil, nil（表示继续执行）
 	result, err := service.CheckIdempotency(ctx, "")
 	if err != nil {
 		t.Errorf("CheckIdempotency() with empty key should not return error, got: %v", err)
 	}
-
+	
 	if result != nil {
 		t.Error("CheckIdempotency() with empty key should return nil")
 	}
@@ -114,10 +114,10 @@ func TestCheckIdempotency_EmptyKey(t *testing.T) {
 func TestCheckIdempotency_NonExistentKey(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	// 不存在的密钥应该返回nil, nil
 	result, err := service.CheckIdempotency(ctx, "non_existent_key_12345")
 	if err != nil {
@@ -125,7 +125,7 @@ func TestCheckIdempotency_NonExistentKey(t *testing.T) {
 		t.Logf("Database not available (expected in test): %v", err)
 		return
 	}
-
+	
 	if result != nil {
 		t.Error("CheckIdempotency() with non-existent key should return nil")
 	}
@@ -135,20 +135,20 @@ func TestCheckIdempotency_NonExistentKey(t *testing.T) {
 func TestCreateStripePayment_InvalidUserID(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	req := &models.CreatePaymentRequest{
 		UserID:      "", // 无效的用户ID
 		Description: "Test payment",
 	}
-
+	
 	_, err := service.CreateStripePayment(ctx, req, "")
 	if err == nil {
 		t.Error("Expected error for invalid user_id, got nil")
 	}
-
+	
 	// 验证错误类型
 	if err != nil && err.Error() == "" {
 		t.Error("Expected error message, got empty string")
@@ -159,21 +159,21 @@ func TestCreateStripePayment_InvalidUserID(t *testing.T) {
 func TestCreateStripePayment_InvalidDescription(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	// 创建一个超长的描述（超过500字符）
 	longDescription := make([]byte, 600)
 	for i := range longDescription {
 		longDescription[i] = 'a'
 	}
-
+	
 	req := &models.CreatePaymentRequest{
 		UserID:      "valid_user_123",
 		Description: string(longDescription),
 	}
-
+	
 	_, err := service.CreateStripePayment(ctx, req, "")
 	if err == nil {
 		t.Error("Expected error for invalid description, got nil")
@@ -184,15 +184,15 @@ func TestCreateStripePayment_InvalidDescription(t *testing.T) {
 func TestCreateStripePayment_ValidRequest(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	req := &models.CreatePaymentRequest{
 		UserID:      "test_user_123",
 		Description: "Test payment description",
 	}
-
+	
 	// 这个测试需要Stripe API密钥，如果没有配置则跳过
 	response, err := service.CreateStripePayment(ctx, req, "test_idempotency_key_123")
 	if err != nil {
@@ -204,15 +204,15 @@ func TestCreateStripePayment_ValidRequest(t *testing.T) {
 		t.Logf("Skipping test - Stripe API not configured (expected in test): %v", err)
 		return
 	}
-
+	
 	if response == nil {
 		t.Fatal("CreateStripePayment() returned nil response")
 	}
-
+	
 	if response.PaymentID == "" {
 		t.Error("Expected PaymentID to be set")
 	}
-
+	
 	if response.PaymentIntentID == "" {
 		t.Error("Expected PaymentIntentID to be set")
 	}
@@ -223,11 +223,11 @@ func TestAlreadyPaidError(t *testing.T) {
 	err := &AlreadyPaidError{
 		DaysRemaining: 15,
 	}
-
+	
 	if err.Error() == "" {
 		t.Error("Expected error message, got empty string")
 	}
-
+	
 	if err.DaysRemaining != 15 {
 		t.Errorf("Expected DaysRemaining=15, got %d", err.DaysRemaining)
 	}
@@ -246,7 +246,7 @@ func TestFormatAmount(t *testing.T) {
 		{"大金额", 100000, "1000"},
 		{"小数金额2", 1234, "12.34"},
 	}
-
+	
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := formatAmount(tt.amount)
@@ -261,9 +261,9 @@ func TestFormatAmount(t *testing.T) {
 func TestValidatePaymentRequest(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
-
+	
 	tests := []struct {
 		name    string
 		req     *models.CreatePaymentRequest
@@ -294,7 +294,7 @@ func TestValidatePaymentRequest(t *testing.T) {
 			wantErr: true,
 		},
 	}
-
+	
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := service.ValidatePaymentRequest(tt.req)
@@ -309,9 +309,9 @@ func TestValidatePaymentRequest(t *testing.T) {
 func TestGetPaymentIntent(t *testing.T) {
 	// 注意：这个测试需要配置文件，如果配置未初始化会panic
 	t.Skip("Skipping - requires config initialization. Test in integration environment.")
-
+	
 	service := NewPaymentService()
-
+	
 	// 这个测试需要有效的PaymentIntent ID和Stripe API密钥
 	// 如果没有配置，则跳过
 	_, err := service.GetPaymentIntent("pi_test_12345")
@@ -320,7 +320,7 @@ func TestGetPaymentIntent(t *testing.T) {
 		t.Logf("Skipping test - Stripe API not configured or invalid ID (expected in test): %v", err)
 		return
 	}
-
+	
 	// 如果成功，验证返回的intent不为nil
 	// 这个测试在实际环境中需要有效的PaymentIntent ID
 }
@@ -328,7 +328,7 @@ func TestGetPaymentIntent(t *testing.T) {
 // BenchmarkGetCurrentPricing 性能测试：获取定价信息
 func BenchmarkGetCurrentPricing(b *testing.B) {
 	service := NewPaymentService()
-
+	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := service.GetCurrentPricing()
@@ -342,9 +342,10 @@ func BenchmarkGetCurrentPricing(b *testing.B) {
 func BenchmarkCheckIdempotency(b *testing.B) {
 	service := NewPaymentService()
 	ctx := context.Background()
-
+	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = service.CheckIdempotency(ctx, "test_key")
 	}
 }
+

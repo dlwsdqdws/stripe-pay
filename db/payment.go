@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"stripe-pay/conf"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -219,14 +219,10 @@ func GetUserPaymentInfo(userID string) (*UserPaymentInfo, error) {
 		info.LastPaymentAt = &lastPayment.Time
 	}
 
-	// 如果用户有支付记录，尝试同步到 user_payment_info 表（异步更新，不影响返回）
-	if totalCount > 0 {
-		go func() {
-			if err := UpdateUserPaymentInfo(userID, totalAmount); err != nil {
-				zap.L().Warn("Failed to sync user payment info", zap.Error(err), zap.String("user_id", userID))
-			}
-		}()
-	}
+	// 修复：查询接口不应该更新数据库，只应该读取
+	// UpdateUserPaymentInfo 应该只在支付成功时调用（Webhook 或前端更新状态时）
+	// 传入的应该是单次支付金额，而不是总金额
+	// 删除这里的异步更新逻辑，避免重复累加和篡改账目
 
 	return info, nil
 }
@@ -376,6 +372,51 @@ func GetPaymentByPaymentID(paymentID string) (*PaymentHistory, error) {
 	zap.L().Info("Found payment by payment_id",
 		zap.String("payment_id", paymentID),
 		zap.String("payment_intent_id", ph.PaymentIntentID))
+	return ph, nil
+}
+
+// GetPaymentByIntentID 根据payment_intent_id获取支付记录
+func GetPaymentByIntentID(paymentIntentID string) (*PaymentHistory, error) {
+	if paymentIntentID == "" {
+		return nil, nil
+	}
+
+	query := `SELECT id, payment_intent_id, payment_id, idempotency_key, user_id, amount, currency, 
+		status, payment_method, description, metadata, created_at, updated_at
+		FROM payment_history 
+		WHERE payment_intent_id = ? 
+		LIMIT 1`
+
+	ph := &PaymentHistory{}
+	err := DB.QueryRow(query, paymentIntentID).Scan(
+		&ph.ID,
+		&ph.PaymentIntentID,
+		&ph.PaymentID,
+		&ph.IdempotencyKey,
+		&ph.UserID,
+		&ph.Amount,
+		&ph.Currency,
+		&ph.Status,
+		&ph.PaymentMethod,
+		&ph.Description,
+		&ph.Metadata,
+		&ph.CreatedAt,
+		&ph.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		zap.L().Debug("No payment found with payment_intent_id", zap.String("payment_intent_id", paymentIntentID))
+		return nil, nil
+	}
+
+	if err != nil {
+		zap.L().Error("Failed to get payment by payment_intent_id", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
+		return nil, err
+	}
+
+	zap.L().Info("Found payment by payment_intent_id",
+		zap.String("payment_intent_id", paymentIntentID),
+		zap.String("payment_id", ph.PaymentID))
 	return ph, nil
 }
 

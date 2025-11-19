@@ -210,26 +210,6 @@ func registerRoutes(h *server.Hertz) {
 		c.Write(data)
 	})
 
-	// 静态测试页：支付宝支付测试
-	h.GET("/alipay_test.html", func(ctx context.Context, c *app.RequestContext) {
-		var data []byte
-		var err error
-		paths := []string{"alipay_test.html", "./alipay_test.html"}
-		for _, path := range paths {
-			data, err = os.ReadFile(path)
-			if err == nil {
-				break
-			}
-		}
-		if err != nil {
-			c.SetStatusCode(consts.StatusNotFound)
-			c.JSON(consts.StatusNotFound, utils.H{"error": "alipay_test.html not found", "paths_tried": paths})
-			return
-		}
-		c.Response.Header.SetContentType("text/html; charset=utf-8")
-		c.Write(data)
-	})
-
 	// 支付相关路由
 	api := h.Group("/api/v1")
 	{
@@ -242,7 +222,6 @@ func registerRoutes(h *server.Hertz) {
 		{
 			paymentAPI.POST("/create-payment", handlers.CreateStripePayment)
 			paymentAPI.POST("/create-wechat-payment", handlers.CreateStripeWeChatPayment)
-			paymentAPI.POST("/create-alipay-payment", handlers.CreateStripeAlipayPayment)
 			paymentAPI.POST("/confirm-payment", handlers.ConfirmStripePayment)
 			paymentAPI.POST("/refund", handlers.RefundPayment)
 		}

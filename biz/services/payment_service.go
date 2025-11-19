@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"stripe-pay/biz"
 	"stripe-pay/biz/models"
+	"stripe-pay/common"
 	"stripe-pay/conf"
 	"stripe-pay/db"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -226,17 +227,23 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 	zap.L().Debug("Service: Setting Stripe API key")
 	stripe.Key = s.cfg.Stripe.SecretKey
 
+	// 生成支付ID（在创建 PaymentIntent 之前，以便存入 metadata）
+	paymentID := uuid.New().String()
+	zap.L().Debug("Service: Generated payment ID", zap.String("payment_id", paymentID))
+
 	// 创建 Payment Intent
 	zap.L().Info("Service: Creating Stripe PaymentIntent",
 		zap.Int64("amount", pricing.Amount),
 		zap.String("currency", pricing.Currency),
-		zap.String("idempotency_key", idempotencyKey))
+		zap.String("idempotency_key", idempotencyKey),
+		zap.String("payment_id", paymentID))
 	params := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(pricing.Amount),
 		Currency: stripe.String(pricing.Currency),
 		Metadata: map[string]string{
 			"user_id":     req.UserID,
 			"description": req.Description,
+			"payment_id":  paymentID, // 优化4: 将 payment_id 存入 metadata，Webhook 可直接获取
 		},
 		// 启用自动支付方式（包含 Apple Pay）
 		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
@@ -249,18 +256,24 @@ func (s *PaymentService) CreateStripePayment(ctx context.Context, req *models.Cr
 		params.IdempotencyKey = stripe.String(idempotencyKey)
 	}
 
+	startTime := time.Now()
 	intent, err := paymentintent.New(params)
+	duration := time.Since(startTime)
+
 	if err != nil {
 		zap.L().Error("Service: Failed to create Stripe PaymentIntent", zap.Error(err))
+		// 记录支付失败指标
+		common.RecordPayment("stripe", "failed", pricing.Amount, pricing.Currency, duration)
 		return nil, fmt.Errorf("failed to create payment intent: %w", err)
 	}
+
+	// 记录支付创建指标
+	common.RecordPayment("stripe", "created", pricing.Amount, pricing.Currency, duration)
+
 	zap.L().Info("Service: Stripe PaymentIntent created",
 		zap.String("payment_intent_id", intent.ID),
-		zap.String("status", string(intent.Status)))
-
-	// 生成支付ID
-	paymentID := uuid.New().String()
-	zap.L().Debug("Service: Generated payment ID", zap.String("payment_id", paymentID))
+		zap.String("status", string(intent.Status)),
+		zap.String("payment_id", paymentID))
 
 	// 保存到数据库
 	zap.L().Debug("Service: Saving payment to database",
@@ -373,6 +386,10 @@ func (s *PaymentService) CreateWeChatPayment(ctx context.Context, req *models.Cr
 	// 设置Stripe密钥
 	stripe.Key = s.cfg.Stripe.SecretKey
 
+	// 优化4: 生成支付ID（在创建 PaymentIntent 之前，以便存入 metadata）
+	paymentID := uuid.New().String()
+	zap.L().Debug("Service: Generated payment ID for WeChat payment", zap.String("payment_id", paymentID))
+
 	client := strings.ToLower(strings.TrimSpace(req.Client))
 	if client == "" {
 		client = "web"
@@ -385,6 +402,7 @@ func (s *PaymentService) CreateWeChatPayment(ctx context.Context, req *models.Cr
 		Metadata: map[string]string{
 			"user_id":     req.UserID,
 			"description": req.Description,
+			"payment_id":  paymentID, // 优化4: 将 payment_id 存入 metadata
 		},
 		PaymentMethodOptions: &stripe.PaymentIntentPaymentMethodOptionsParams{
 			WeChatPay: &stripe.PaymentIntentPaymentMethodOptionsWeChatPayParams{
@@ -415,7 +433,7 @@ func (s *PaymentService) CreateWeChatPayment(ctx context.Context, req *models.Cr
 		}
 		err = db.SavePaymentWithMetadata(
 			intent.ID,
-			uuid.New().String(),
+			paymentID, // 使用之前生成的 paymentID
 			idempotencyKey,
 			req.UserID,
 			intent.Amount,
@@ -448,108 +466,6 @@ func (s *PaymentService) CreateWeChatPayment(ctx context.Context, req *models.Cr
 		"client_secret":     intent.ClientSecret,
 		"payment_intent_id": intent.ID,
 		"status":            intent.Status,
-		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
-	}, nil
-}
-
-// CreateAlipayPayment 创建支付宝支付
-func (s *PaymentService) CreateAlipayPayment(ctx context.Context, req *models.CreateAlipayPaymentRequest, idempotencyKey string) (map[string]interface{}, error) {
-	// 验证输入
-	if err := biz.ValidateUserID(req.UserID); err != nil {
-		return nil, fmt.Errorf("invalid user_id: %w", err)
-	}
-	if err := biz.ValidateDescription(req.Description); err != nil {
-		return nil, fmt.Errorf("invalid description: %w", err)
-	}
-	if err := biz.ValidateURL(req.ReturnURL); err != nil {
-		return nil, fmt.Errorf("invalid return_url: %w", err)
-	}
-
-	// 检查用户支付有效性
-	validity, err := s.CheckUserPaymentValidity(req.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check user payment validity: %w", err)
-	}
-	if validity.Valid {
-		return map[string]interface{}{
-			"already_paid":   true,
-			"message":        "用户已支付成功，无需重复支付",
-			"user_info":      validity.UserInfo,
-			"days_remaining": validity.DaysRemaining,
-		}, nil
-	}
-
-	// 获取定价信息
-	pricing, err := s.GetCurrentPricing()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pricing: %w", err)
-	}
-
-	// 设置Stripe密钥
-	stripe.Key = s.cfg.Stripe.SecretKey
-
-	params := &stripe.PaymentIntentParams{
-		Amount:             stripe.Int64(pricing.Amount),
-		Currency:           stripe.String(pricing.Currency),
-		PaymentMethodTypes: stripe.StringSlice([]string{"alipay"}),
-		Metadata: map[string]string{
-			"user_id":     req.UserID,
-			"description": req.Description,
-		},
-	}
-
-	if idempotencyKey != "" {
-		params.IdempotencyKey = stripe.String(idempotencyKey)
-	}
-
-	intent, err := paymentintent.New(params)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create alipay payment intent: %w", err)
-	}
-
-	// 保存到数据库
-	if db.DB != nil {
-		metadata := map[string]string{
-			"user_id":     req.UserID,
-			"description": req.Description,
-		}
-		err = db.SavePaymentWithMetadata(
-			intent.ID,
-			uuid.New().String(),
-			idempotencyKey,
-			req.UserID,
-			intent.Amount,
-			string(intent.Currency),
-			string(intent.Status),
-			"alipay",
-			req.Description,
-			metadata,
-		)
-		if err != nil {
-			if dupErr, ok := err.(*db.DuplicateIdempotencyKeyError); ok {
-				existingPayment, queryErr := db.GetPaymentByIdempotencyKey(dupErr.Key)
-				if queryErr == nil && existingPayment != nil {
-					intent, getErr := paymentintent.Get(existingPayment.PaymentIntentID, nil)
-					if getErr == nil {
-						return map[string]interface{}{
-							"client_secret":     intent.ClientSecret,
-							"payment_intent_id": intent.ID,
-							"status":            intent.Status,
-							"return_url":        req.ReturnURL,
-							"message":           "返回已存在的支付记录",
-						}, nil
-					}
-				}
-			}
-			zap.L().Warn("Failed to save alipay payment to database", zap.Error(err))
-		}
-	}
-
-	return map[string]interface{}{
-		"client_secret":     intent.ClientSecret,
-		"payment_intent_id": intent.ID,
-		"status":            intent.Status,
-		"return_url":        req.ReturnURL,
 		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
 	}, nil
 }

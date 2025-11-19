@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
 	"stripe-pay/conf"
 	"stripe-pay/db"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -37,12 +37,6 @@ type CreateWeChatPaymentRequest struct {
 	Client      string `json:"client"`                     // 可选：web 或 mobile，默认 web
 }
 
-// CreateAlipayPaymentRequest 专用于创建支付宝支付的请求
-type CreateAlipayPaymentRequest struct {
-	UserID      string `json:"user_id" binding:"required"` // 用户ID（必填）
-	Description string `json:"description"`                // 可选描述
-	ReturnURL   string `json:"return_url"`                 // 可选：支付完成后跳转地址
-}
 
 // getCurrentPricing 返回当前售卖价格（单位：分）与币种
 // 从数据库读取支付金额配置
@@ -236,10 +230,8 @@ func CreateStripePayment(ctx context.Context, c *app.RequestContext) {
 			"user_id":     req.UserID,
 			"description": req.Description,
 		},
-		// 启用自动支付方式（包含 Apple Pay）
-		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
-			Enabled: stripe.Bool(true),
-		},
+		// 明确指定支付方式类型，包含 Apple Pay
+		PaymentMethodTypes: stripe.StringSlice([]string{"card", "apple_pay"}),
 	}
 
 	// 如果提供了Idempotency Key，传递给Stripe（Stripe也支持幂等性）
@@ -472,155 +464,6 @@ func CreateStripeWeChatPayment(ctx context.Context, c *app.RequestContext) {
 		"client_secret":     intent.ClientSecret,
 		"payment_intent_id": intent.ID,
 		"status":            intent.Status,
-		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
-	})
-}
-
-// CreateStripeAlipayPayment 创建 Stripe Alipay 的 PaymentIntent
-func CreateStripeAlipayPayment(ctx context.Context, c *app.RequestContext) {
-	var req CreateAlipayPaymentRequest
-	if err := c.BindAndValidate(&req); err != nil {
-		zap.L().Error("Failed to bind request", zap.Error(err))
-		c.JSON(consts.StatusBadRequest, utils.H{"error": "Invalid request"})
-		return
-	}
-
-	// 输入验证增强
-	if err := ValidateUserID(req.UserID); err != nil {
-		zap.L().Error("Invalid user_id", zap.Error(err))
-		c.JSON(consts.StatusBadRequest, utils.H{"error": err.Error()})
-		return
-	}
-	if err := ValidateDescription(req.Description); err != nil {
-		zap.L().Error("Invalid description", zap.Error(err))
-		c.JSON(consts.StatusBadRequest, utils.H{"error": err.Error()})
-		return
-	}
-	if err := ValidateURL(req.ReturnURL); err != nil {
-		zap.L().Error("Invalid return_url", zap.Error(err))
-		c.JSON(consts.StatusBadRequest, utils.H{"error": err.Error()})
-		return
-	}
-
-	// 幂等性检查：获取Idempotency Key
-	idempotencyKey := getIdempotencyKey(c)
-	if idempotencyKey != "" && db.DB != nil {
-		existingPayment, err := db.GetPaymentByIdempotencyKey(idempotencyKey)
-		if err != nil {
-			zap.L().Error("Failed to check idempotency", zap.Error(err))
-			// 继续执行，不阻止请求
-		} else if existingPayment != nil {
-			// 找到已存在的支付记录，返回已存在的支付信息
-			zap.L().Info("Duplicate request detected, returning existing payment",
-				zap.String("idempotency_key", idempotencyKey),
-				zap.String("payment_intent_id", existingPayment.PaymentIntentID))
-			c.JSON(consts.StatusOK, utils.H{
-				"client_secret":     "", // 已存在的支付需要从Stripe获取
-				"payment_intent_id": existingPayment.PaymentIntentID,
-				"status":            existingPayment.Status,
-				"return_url":        req.ReturnURL,
-				"message":           "返回已存在的支付记录",
-			})
-			return
-		}
-	}
-
-	// 先检查用户是否已经支付成功过（30天内有效）
-	if db.DB != nil {
-		userInfo, err := db.GetUserPaymentInfo(req.UserID)
-		if err == nil && userInfo != nil && userInfo.HasPaid {
-			// 检查上次支付时间是否在30天内
-			if userInfo.LastPaymentAt != nil {
-				daysSinceLastPayment := time.Since(*userInfo.LastPaymentAt).Hours() / 24
-				if daysSinceLastPayment <= 30 {
-					zap.L().Info("User already paid within 30 days, skipping alipay payment creation",
-						zap.String("user_id", req.UserID),
-						zap.Float64("days_since", daysSinceLastPayment))
-					c.JSON(consts.StatusOK, utils.H{
-						"already_paid":   true,
-						"message":        "用户已支付成功，无需重复支付",
-						"user_info":      userInfo,
-						"days_remaining": int(30 - daysSinceLastPayment),
-					})
-					return
-				} else {
-					zap.L().Info("User payment expired, need to pay again",
-						zap.String("user_id", req.UserID),
-						zap.Float64("days_since", daysSinceLastPayment))
-					// 支付已过期，继续创建新支付
-				}
-			} else {
-				// 没有上次支付时间，继续创建新支付
-				zap.L().Info("User has paid but no last payment time, continuing", zap.String("user_id", req.UserID))
-			}
-		}
-	}
-
-	cfg := conf.GetConf()
-	stripe.Key = cfg.Stripe.SecretKey
-
-	amount, currency, _ := getCurrentPricing()
-
-	params := &stripe.PaymentIntentParams{
-		Amount:             stripe.Int64(amount),
-		Currency:           stripe.String(currency),
-		PaymentMethodTypes: stripe.StringSlice([]string{"alipay"}),
-		// 不立即确认，让前端使用 Stripe.js 确认以生成二维码
-		Metadata: map[string]string{
-			"user_id":     req.UserID,
-			"description": req.Description,
-		},
-	}
-
-	// 注意：return_url 不能在创建时设置（除非 confirm=true）
-	// 应该在前端确认支付时设置
-
-	intent, err := paymentintent.New(params)
-	if err != nil {
-		zap.L().Error("Failed to create alipay payment intent", zap.Error(err))
-		stripeErr := ""
-		if stripeErrObj, ok := err.(*stripe.Error); ok {
-			stripeErr = stripeErrObj.Error()
-		}
-		c.JSON(consts.StatusInternalServerError, utils.H{
-			"error":        "Failed to create payment intent",
-			"stripe_error": stripeErr,
-			"message":      "请确认 Stripe 账户已启用 Alipay，且账户地区支持支付宝",
-		})
-		return
-	}
-
-	// 保存到数据库
-	if db.DB != nil {
-		metadata := map[string]string{
-			"user_id":     req.UserID,
-			"description": req.Description,
-		}
-		err = db.SavePaymentWithMetadata(
-			intent.ID,
-			uuid.New().String(),
-			idempotencyKey, // 保存幂等性密钥
-			req.UserID,
-			intent.Amount,
-			string(intent.Currency),
-			string(intent.Status),
-			"alipay",
-			req.Description,
-			metadata,
-		)
-		if err != nil {
-			zap.L().Warn("Failed to save alipay payment to database", zap.Error(err))
-		}
-	}
-
-	// 返回 client_secret 给前端，前端需要使用 Stripe.js confirmPayment 来确认
-	// 确认后会生成 next_action（二维码或跳转链接）
-	// return_url 应该在 confirmPayment 时设置，而不是创建时
-	c.JSON(consts.StatusOK, utils.H{
-		"client_secret":     intent.ClientSecret,
-		"payment_intent_id": intent.ID,
-		"status":            intent.Status,
-		"return_url":        req.ReturnURL, // 返回给前端，让前端在确认时使用
 		"message":           "请使用 Stripe.js 在前端确认支付以生成二维码",
 	})
 }

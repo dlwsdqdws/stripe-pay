@@ -16,12 +16,6 @@ type CreateWeChatPaymentRequest struct {
 	Client      string `json:"client"`                     // 可选：web 或 mobile，默认 web
 }
 
-// CreateAlipayPaymentRequest 创建支付宝支付请求
-type CreateAlipayPaymentRequest struct {
-	UserID      string `json:"user_id" binding:"required"` // 用户ID（必填）
-	Description string `json:"description"`                // 可选描述
-	ReturnURL   string `json:"return_url"`                 // 可选：支付完成后跳转地址
-}
 
 // PaymentResponse 支付响应
 type PaymentResponse struct {

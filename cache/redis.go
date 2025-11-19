@@ -82,6 +82,7 @@ const (
 	UserPaymentKeyPrefix    = "user_payment:"
 	StripeStatusKeyPrefix   = "stripe_status:" // Stripe 状态缓存
 	StatusChangeEventPrefix = "status_change:" // 状态变化事件
+	WebhookEventPrefix      = "webhook:event:" // Webhook 事件去重（优化3）
 )
 
 // PaymentCacheData 支付缓存数据结构
@@ -205,6 +206,22 @@ func SetPaymentByIntentID(ctx context.Context, paymentIntentID string, data *Pay
 	}
 
 	zap.L().Debug("Payment cached by intent_id", zap.String("payment_intent_id", paymentIntentID))
+	return nil
+}
+
+// DeletePaymentByIntentID 通过 payment_intent_id 删除支付缓存
+func DeletePaymentByIntentID(ctx context.Context, paymentIntentID string) error {
+	if !IsAvailable() {
+		return nil
+	}
+
+	key := PaymentIntentKeyPrefix + paymentIntentID
+	if err := client.Del(ctx, key).Err(); err != nil {
+		zap.L().Warn("Failed to delete payment cache by intent_id", zap.Error(err), zap.String("payment_intent_id", paymentIntentID))
+		return err
+	}
+
+	zap.L().Debug("Payment cache deleted by intent_id", zap.String("payment_intent_id", paymentIntentID))
 	return nil
 }
 
@@ -435,9 +452,43 @@ func ClearStatusChangeEvent(ctx context.Context, paymentIntentID string) error {
 	return nil
 }
 
+// IsWebhookEventProcessed 检查 Webhook 事件是否已处理（优化3: 幂等性）
+func IsWebhookEventProcessed(ctx context.Context, eventID string) (bool, error) {
+	if !IsAvailable() {
+		return false, nil
+	}
+
+	key := WebhookEventPrefix + eventID
+	exists, err := client.Exists(ctx, key).Result()
+	if err != nil {
+		zap.L().Warn("Failed to check webhook event", zap.Error(err), zap.String("event_id", eventID))
+		return false, err
+	}
+
+	return exists > 0, nil
+}
+
+// MarkWebhookEventProcessed 标记 Webhook 事件已处理（优化3: 幂等性）
+func MarkWebhookEventProcessed(ctx context.Context, eventID string) error {
+	if !IsAvailable() {
+		return nil
+	}
+
+	key := WebhookEventPrefix + eventID
+	if err := client.Set(ctx, key, "1", WebhookEventTTL).Err(); err != nil {
+		zap.L().Warn("Failed to mark webhook event as processed", zap.Error(err), zap.String("event_id", eventID))
+		return err
+	}
+
+	zap.L().Debug("Webhook event marked as processed", zap.String("event_id", eventID))
+	return nil
+}
+
 // 默认缓存过期时间
 const (
 	DefaultPaymentCacheTTL = 30 * time.Minute // 支付信息缓存30分钟
 	DefaultUserCacheTTL    = 15 * time.Minute // 用户支付信息缓存15分钟
 	DefaultStripeStatusTTL = 10 * time.Second // Stripe 状态缓存10秒（仅用于中间状态）
+	FinalStatusCacheTTL    = 5 * time.Minute  // 最终状态短期缓存5分钟（优化5）
+	WebhookEventTTL        = 24 * time.Hour   // Webhook 事件去重缓存24小时（优化3）
 )

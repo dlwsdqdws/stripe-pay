@@ -3,9 +3,9 @@ package common
 import (
 	"context"
 	"fmt"
-	"strings"
 	"stripe-pay/cache"
 	"stripe-pay/conf"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,7 +78,6 @@ func isPaymentEndpoint(path string) bool {
 	paymentPaths := []string{
 		"/api/v1/stripe/create-payment",
 		"/api/v1/stripe/create-wechat-payment",
-		"/api/v1/stripe/create-alipay-payment",
 		"/api/v1/stripe/confirm-payment",
 		"/api/v1/stripe/refund",
 		"/api/v1/payment/update-status",
